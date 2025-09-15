@@ -19,7 +19,7 @@ pip install numpy matplotlib pillow scipy opencv-python
 ```
 3. Run the application:
 ```bash
-python mri_analysis_tool.py
+python MRI Contraction Analysis Tool.py
 ```
 
 ## Main Interface
@@ -30,16 +30,33 @@ python mri_analysis_tool.py
 - **Centerline**: Polynomial fitting and visualization, Save centreline points for analysing contraction 
 - **Contraction Analysis**: Lesser/Greater contraction map, Wave tracking
 
+<center>
+<img src="./Figures/menu bar.png">
+</center>
+
 ### Toolbar
 - **Status Bar**: Current mode and operation status
 
+  <center>
+  <img src="./Figures/status.png">
+  </center>
+
 ### Control Panel
 - Navigation controls (Previous/Next frame)
+
 - Zoom controls (Zoom In/Out/Reset)
+
 - ROI editing tools
+
 - Generate and display/hide centreline
+
 - Image enhancement controls
+
 - Display/hide optical flow vectors
+
+  <center>
+  <img src="./Figures/control.png" width="30%">
+  </center>
 
 ## Basic Workflow
 
@@ -62,27 +79,70 @@ python mri_analysis_tool.py
 
 ### 3. Centerline
 - **Split Current**: Divide spline at key points from current frame
+
 - **Split All**: Divide spline at key points from all frames
+
 - **Toggle Display**: Show/hide split points (lesser or greater curvature has 200 points)
+
 - **Calc Midpoints**: Calculate valid midpoints for current frame
+
 - **Calc All Mid**: Calculate midpoints for all processed frames
+
 - **Hide Midpoints**: Display/hide midpoint visualization
+
 - **Fit Centerline**: Calculate polynomial centerline from midpoints of all frames
+
 - **Toggle Centerline**: Display/hide centerline visualization
+
+  *Red line is the centerline. Pink line is the lesser curvature. Green is the greater curvature.*
+
+  <center>
+  <img src="./Figures/centerline.png"width="50%">
+  </center>
+
+*Click split current button, the length of greater and lesser will shown in the status block*
+
+<center>
+<img src="./Figures/length.png">
+</center>
 
 ### 3. Contraction Analysis
 
 - Use `ROI → Save Wall Points` to export wall points location from all frames
+
 - Use `Centerline → Save Centerline Data` to export centerline points location 
-- Use `Contraction Analysis → Contraction Analysis Parameters` to get the physical length
+
+- Use `Contraction Analysis → Contraction Analysis Parameters` to set the physical length parameters
+
 - Use `Contraction Analysis → Lesser Contraction Map` to get the lesser contraction map
+
 - Use `Contraction Analysis → Manual Wave Tracking` to analyze contraction wave of lesser curvature. 
+
 - Use `Contraction Analysis → Greater Contraction Map` to get the greater contraction map
+
 - Use `Contraction Analysis → Manual Wave Tracking` to analyze contraction wave of greater curvature
+
+  *The left side represents the distal region, and the right side represents the proximal region, regardless of whether it is the lesser or greater curvature contraction map.*
+
+  <center>
+  <img src="./Figures/lesser.png" width="50%">
+  </center>
+
+  <center>
+  <img src="./Figures/lesser.png" width="50%”>
+  </center>
+
+  <center>
+  <img src="./Figures/greater.png" width="50%">
+  </center>
 
 ### 4. Save workspace
 
 - Use `File → Save Workspace` to save segmenting results
+
+### 5. Exit application
+
+- Use `File → Exit` to exit tool
 
 ## Advanced Features
 
@@ -98,13 +158,18 @@ Access through `Contraction Analysis → Contraction Analysis Parameters`:
 
 **Average Length Parameters**
 
-- Lesser Curvature Point Spacing: Default 1.17 mm
-- Greater Curvature Point Spacing: Default 1.56 mm
+- Lesser Curvature Point Spacing: Default 1.0 mm
+- Greater Curvature Point Spacing: Default 1.0 mm
 
 **Other Parameters**
 
 - Frame Duration: Time between frames (default 0.475 seconds)
+
 - Max Contraction Size: Visualization limit (default 10.0 mm)
+
+  <center>
+  <img src="./Figures/contraction analysis parameters.png">
+  </center>
 
 #### Analysis Types
 
@@ -182,7 +247,12 @@ Access through `Contraction Analysis`:
 For technical support and bug reports, please contact:
 - Email: [lsu876@aucklanduni.ac.nz]()
 - License: Academic Use Only
+- Version: 1.0, 2025.09.15
+
+## References
+
+- Hosseini, S., Avci, R., Paskaranandavadivel, N., Suresh, V., & Cheng, L. K. (2023). Quantification of the Regional Properties of Gastric Motility Using Dynamic Magnetic Resonance Images. *IEEE open journal of engineering in medicine and biology*, *4*, 38–44. https://doi.org/10.1109/OJEMB.2023.3261224
 
 ---
 
-*Note: This tool is designed for research purposes.*
+*Note: This tool is designed for research purposes.* In this version, centerline is calculated using all midpoints not valid midpoints.
