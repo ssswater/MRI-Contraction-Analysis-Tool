@@ -14,6 +14,7 @@ from matplotlib.path import Path
 from scipy.optimize import curve_fit
 import hashlib
 from scipy import interpolate
+import csv  
 
 # Constants
 N_REGIONS = 20  # number of regions for contraction analysis
@@ -269,7 +270,14 @@ class MRISegmentationApp:
         self.show_control_points = True    # Show control points by default
         self.show_midpoints = True         # Show midpoints by default
         self.centerline_plots = []         # Store the plotted centerlines
-        self.show_centerline = True  # Show the centerline by default
+        self.show_centerline = True        # Show the centerline by default
+
+        self.uniform_sampling_points = {}  # 存储每帧的200个均匀采样点
+        self.show_uniform_points = True    # 是否显示均匀采样点
+        self.custom_origin_x = 0.0  # 自定义原点X坐标
+        self.custom_origin_y = 0.0  # 自定义原点X坐标
+        self.custom_origin_z = 0.0  # 自定义原点Y坐标
+
 
         # key points (distal and proximal)
         self.key_points = {}  # {frame_idx: {'major': {'index': int, 'position': [x,y]}, 'minor': ...}}
@@ -371,6 +379,13 @@ class MRISegmentationApp:
                     for k, v in self.spline_points_per_frame.items()
                 },
                 "show_centerline": self.show_centerline, 
+
+                # 新增：保存原点坐标
+                "origin_coordinates": {
+                    "custom_origin_x": self.custom_origin_x,
+                    "custom_origin_y": self.custom_origin_y,
+                    "custom_origin_z": self.custom_origin_z
+                },
 
                 "contraction_parameters": {
                     "lesser_spacing": self.lesser_spacing.get(),
@@ -560,6 +575,13 @@ class MRISegmentationApp:
                     (" (需补全)" if loaded_kp < 2 else "")
                 )
 
+            #加载原点坐标
+            if "origin_coordinates" in workspace_data:
+                origin_coords = workspace_data["origin_coordinates"]
+                self.custom_origin_x = float(origin_coords.get("custom_origin_x", 0.0))
+                self.custom_origin_y = float(origin_coords.get("custom_origin_y", 0.0))
+                self.custom_origin_z = float(origin_coords.get("custom_origin_z", 0.0))
+
             # load contraction parameters
             if "contraction_parameters" in workspace_data:
                 params = workspace_data["contraction_parameters"]
@@ -734,12 +756,12 @@ class MRISegmentationApp:
         self.pixel_spacing = (float(spacing_x), float(spacing_y))
         self.has_pixel_spacing = (spacing_x != 1.0 or spacing_y != 1.0)
         
-        messagebox.showinfo("Pixel Spacing Set", f"Pixel spacing set to: X={spacing_x:.4f} mm, Y={spacing_y:.4f} mm")
+        messagebox.showinfo("Pixel Spacing Set", f"Pixel spacing set to: X={spacing_x:.6f} mm, Y={spacing_y:.6f} mm")
     
     def show_parameter_dialog(self):
         dialog = tk.Toplevel(self.root)
         dialog.title("Contraction Analysis Parameters")
-        dialog.geometry("450x450")  
+        dialog.geometry("450x550")  
         dialog.transient(self.root)
         dialog.grab_set()
 
@@ -767,6 +789,25 @@ class MRISegmentationApp:
         
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+        # === 新增：原点坐标设置 ===
+        origin_frame = ttk.LabelFrame(scrollable_frame, text="Custom Origin Coordinates")
+        origin_frame.pack(fill=tk.X, pady=5, padx=5)
+        
+        ttk.Label(origin_frame, text="X Origin:").grid(row=0, column=0, sticky=tk.W, pady=5, padx=5)
+        x_origin_entry = ttk.Entry(origin_frame, width=12)
+        x_origin_entry.insert(0, str(self.custom_origin_x))
+        x_origin_entry.grid(row=0, column=1, pady=5, padx=5)
+
+        ttk.Label(origin_frame, text="Y Origin:").grid(row=1, column=0, sticky=tk.W, pady=5, padx=5)
+        y_origin_entry = ttk.Entry(origin_frame, width=12)
+        y_origin_entry.insert(0, str(self.custom_origin_y))
+        y_origin_entry.grid(row=1, column=1, pady=5, padx=5)
+        
+        ttk.Label(origin_frame, text="Z Origin:").grid(row=2, column=0, sticky=tk.W, pady=5, padx=5)
+        z_origin_entry = ttk.Entry(origin_frame, width=12)
+        z_origin_entry.insert(0, str(self.custom_origin_z))
+        z_origin_entry.grid(row=2, column=1, pady=5, padx=5)
         
         # Pixel spacing 
         pixel_spacing_frame = ttk.LabelFrame(scrollable_frame, text="Pixel Spacing Settings (mm/pixel)")
@@ -790,7 +831,7 @@ class MRISegmentationApp:
                     raise ValueError("Pixel spacing values must be positive")
                 self.pixel_spacing = (x_val, y_val)
                 self.has_pixel_spacing = (x_val != 1.0 or y_val != 1.0)
-                messagebox.showinfo("Success", f"Pixel spacing updated to: X={x_val:.4f} mm, Y={y_val:.4f} mm")
+                messagebox.showinfo("Success", f"Pixel spacing updated to: X={x_val:.6f} mm, Y={y_val:.6f} mm")
             except ValueError as e:
                 messagebox.showerror("Error", f"Invalid input: {str(e)}")
         
@@ -832,6 +873,14 @@ class MRISegmentationApp:
         
         def save_parameters():
             try:
+                # 保存原点坐标
+                x_origin = float(x_origin_entry.get())
+                y_origin = float(y_origin_entry.get())
+                z_origin = float(z_origin_entry.get())
+                self.custom_origin_x = x_origin
+                self.custom_origin_y = y_origin
+                self.custom_origin_z = z_origin
+
                 x_val = float(x_entry.get())
                 y_val = float(y_entry.get())
                 if x_val <= 0 or y_val <= 0:
@@ -859,6 +908,15 @@ class MRISegmentationApp:
                 messagebox.showerror("Error", f"Invalid input: {str(e)}")
         
         def reset_to_default():
+
+            # 重置原点坐标
+            x_origin_entry.delete(0, tk.END)
+            x_origin_entry.insert(0, "0.0")
+            y_origin_entry.delete(0, tk.END)
+            y_origin_entry.insert(0, "0.0")
+            z_origin_entry.delete(0, tk.END)
+            z_origin_entry.insert(0, "0.0")
+
             # reset pixel spacing
             x_entry.delete(0, tk.END)
             x_entry.insert(0, "1.0")
@@ -1100,8 +1158,8 @@ class MRISegmentationApp:
         spacing_label = tk.Label(params_frame, text=f"{spacing:.2f} mm", font=("Arial", 10))
         duration_label = tk.Label(params_frame, text=f"{frame_duration:.3f} s", font=("Arial", 10))
         contraction_label = tk.Label(params_frame, text=f"{max_contraction:.1f} mm", font=("Arial", 10))
-        pixel_x_label = tk.Label(params_frame, text=f"{pixel_spacing_x:.4f} mm", font=("Arial", 10))
-        pixel_y_label = tk.Label(params_frame, text=f"{pixel_spacing_y:.4f} mm", font=("Arial", 10))
+        pixel_x_label = tk.Label(params_frame, text=f"{pixel_spacing_x:.6f} mm", font=("Arial", 10))
+        pixel_y_label = tk.Label(params_frame, text=f"{pixel_spacing_y:.6f} mm", font=("Arial", 10))
         
         tk.Label(params_frame, text="Pixel Spacing X:", 
                 font=("Arial", 10, "bold")).grid(row=0, column=0, sticky=tk.W, pady=3, padx=5)  
@@ -1161,8 +1219,8 @@ class MRISegmentationApp:
             spacing_label.config(text=f"{new_spacing:.2f} mm")
             duration_label.config(text=f"{self.frame_duration.get():.3f} s")
             contraction_label.config(text=f"{self.max_contraction.get():.1f} mm")
-            pixel_x_label.config(text=f"{self.pixel_spacing[0]:.4f} mm")
-            pixel_y_label.config(text=f"{self.pixel_spacing[1]:.4f} mm")
+            pixel_x_label.config(text=f"{self.pixel_spacing[0]:.6f} mm")
+            pixel_y_label.config(text=f"{self.pixel_spacing[1]:.6f} mm")
             
             check_window.deiconify()
         
@@ -1971,6 +2029,50 @@ class MRISegmentationApp:
         self.propagate_button = tk.Button(Propagate_buttons_frame, text="Propagate to Next Frame",command=self.propagate_roi_with_flow)
         self.propagate_button.pack(fill=tk.X, pady=2)
 
+        # 在ROI控制部分添加新按钮
+        advanced_roi_frame = tk.LabelFrame(control_panel, text="Advanced ROI")
+        advanced_roi_frame.pack(fill=tk.X, pady=5)
+
+        auto_detect_frame = tk.Frame(advanced_roi_frame)
+        auto_detect_frame.pack(fill=tk.X)
+
+        smoothing_frame = tk.Frame(advanced_roi_frame)
+        smoothing_frame.pack(fill=tk.X)
+
+        self.temporal_smooth_btn = tk.Button(smoothing_frame, text="Temporal Smoothing", 
+                                            command=self.temporal_smoothing)
+        self.temporal_smooth_btn.pack(fill=tk.X, pady=2)
+
+        self.motion_optimize_btn = tk.Button(smoothing_frame, text="Optimize Motion", 
+                                    command=self.optimize_motion_consistency)
+        self.motion_optimize_btn.pack(fill=tk.X, pady=2)
+
+
+        # 在 Centerline 框架中添加均匀采样按钮
+        uniform_frame = tk.LabelFrame(roi_frame, text="Uniform Sampling")
+        uniform_frame.pack(fill=tk.X, pady=5)
+        
+        uniform_buttons_frame = tk.Frame(uniform_frame)
+        uniform_buttons_frame.pack(fill=tk.X)
+        
+        self.uniform_current_button = tk.Button(uniform_buttons_frame, text="Sample Current", 
+                                            command=self.sample_current_frame_uniformly)
+        self.uniform_all_button = tk.Button(uniform_buttons_frame, text="Sample All", 
+                                        command=self.sample_all_frames_uniformly)
+        
+        self.uniform_current_button.grid(row=0, column=0, padx=2, pady=2, sticky="ew")
+        self.uniform_all_button.grid(row=0, column=1, padx=2, pady=2, sticky="ew")
+        uniform_buttons_frame.columnconfigure(0, weight=1)
+        uniform_buttons_frame.columnconfigure(1, weight=1)
+        
+        self.toggle_uniform_button = tk.Button(uniform_frame, text="Hide Uniform Points", 
+                                            command=self.toggle_uniform_points)
+        self.toggle_uniform_button.pack(fill=tk.X, pady=2)
+        
+        self.export_uniform_button = tk.Button(uniform_frame, text="Export Uniform Points", 
+                                            command=self.export_uniform_points)
+        self.export_uniform_button.pack(fill=tk.X, pady=2)
+
         # Centerline frame -
         centerline_frame = tk.LabelFrame(control_panel, text="Centerline")
         centerline_frame.pack(fill=tk.X, pady=5)
@@ -2502,14 +2604,282 @@ class MRISegmentationApp:
         self.calc_all_midpoints_button.config(state=tk.DISABLED)
         self.update_button_states()
 
+    # 新增函数：对当前帧进行均匀采样
+    def sample_current_frame_uniformly(self):
+        """对当前帧的ROI样条曲线进行均匀采样，生成200个等间隔点"""
+        if self.current_index not in self.roi_points or len(self.roi_points[self.current_index]) < 3:
+            messagebox.showwarning("Warning", "当前帧没有有效的ROI数据")
+            return
+        
+        try:
+            # 获取当前帧的控制点
+            control_points = self.roi_points[self.current_index]
+            
+            # 生成样条曲线
+            points = np.array(control_points)
+            points = np.vstack([points, points[0]])  # 闭合曲线
+            tck, u = splprep([points[:, 0], points[:, 1]], s=0, per=1)
+            
+            # 计算样条曲线的总弧长
+            u_dense = np.linspace(0, 1, 1000)  # 密集采样用于计算弧长
+            spline_dense = np.array(splev(u_dense, tck)).T
+            
+            # 计算累积弧长
+            diffs = np.diff(spline_dense, axis=0)
+            if self.has_pixel_spacing and self.pixel_spacing is not None:
+                spacing_x, spacing_y = self.pixel_spacing
+                dx = diffs[:, 0] * spacing_x
+                dy = diffs[:, 1] * spacing_y
+                dists = np.sqrt(dx**2 + dy**2)
+            else:
+                dists = np.linalg.norm(diffs, axis=1)
+            
+            cum_dists = np.insert(np.cumsum(dists), 0, 0)
+            total_length = cum_dists[-1]
+            
+            # 生成200个等弧长间隔的点
+            target_positions = np.linspace(0, total_length, 200)
+            uniform_points = []
+            
+            for pos in target_positions:
+                idx = np.searchsorted(cum_dists, pos) - 1
+                if idx < 0:
+                    idx = 0
+                if idx >= len(spline_dense)-1:
+                    uniform_points.append(spline_dense[-1])
+                    continue
+                
+                # 线性插值
+                t = (pos - cum_dists[idx]) / (cum_dists[idx+1] - cum_dists[idx])
+                interp_point = spline_dense[idx] + t * (spline_dense[idx+1] - spline_dense[idx])
+                uniform_points.append(interp_point)
+            
+            # 保存结果
+            self.uniform_sampling_points[self.current_index] = np.array(uniform_points)
+            
+            # 更新显示
+            self.update_roi_display()
+            
+            messagebox.showinfo("Success", 
+                            f"当前帧已成功采样200个均匀点\n"
+                            f"曲线总长度: {total_length:.2f} {'mm' if self.has_pixel_spacing else 'pixels'}\n"
+                            f"点间距: {total_length/199:.2f} {'mm' if self.has_pixel_spacing else 'pixels'}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"均匀采样失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    # 新增函数：对所有帧进行均匀采样
+    def sample_all_frames_uniformly(self):
+        """对所有有ROI数据的帧进行均匀采样"""
+        if not self.roi_points:
+            messagebox.showwarning("Warning", "没有可用的ROI数据")
+            return
+        
+        frames_with_roi = [idx for idx in self.roi_points.keys() if len(self.roi_points[idx]) >= 3]
+        
+        if not frames_with_roi:
+            messagebox.showwarning("Warning", "没有有效的ROI数据")
+            return
+        
+        if not messagebox.askyesno("Confirm", f"将对{len(frames_with_roi)}帧进行均匀采样。继续吗？"):
+            return
+        
+        # 创建进度窗口
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("Processing")
+        progress_label = tk.Label(progress_window, text="正在处理...")
+        progress_label.pack(pady=10)
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(progress_window, variable=progress_var, 
+                                    maximum=len(frames_with_roi))
+        progress_bar.pack(pady=10, padx=20, fill=tk.X)
+        progress_window.grab_set()
+        
+        failed_frames = []
+        success_count = 0
+        
+        for i, frame_idx in enumerate(frames_with_roi):
+            progress_var.set(i+1)
+            progress_label.config(text=f"处理帧 {frame_idx+1}/{len(self.image_files)}")
+            progress_window.update()
+            
+            try:
+                # 临时切换到该帧进行处理
+                original_index = self.current_index
+                self.current_index = frame_idx
+                
+                # 调用采样函数
+                control_points = self.roi_points[frame_idx]
+                points = np.array(control_points)
+                points = np.vstack([points, points[0]])
+                tck, u = splprep([points[:, 0], points[:, 1]], s=0, per=1)
+                
+                u_dense = np.linspace(0, 1, 1000)
+                spline_dense = np.array(splev(u_dense, tck)).T
+                
+                diffs = np.diff(spline_dense, axis=0)
+                if self.has_pixel_spacing and self.pixel_spacing is not None:
+                    spacing_x, spacing_y = self.pixel_spacing
+                    dx = diffs[:, 0] * spacing_x
+                    dy = diffs[:, 1] * spacing_y
+                    dists = np.sqrt(dx**2 + dy**2)
+                else:
+                    dists = np.linalg.norm(diffs, axis=1)
+                
+                cum_dists = np.insert(np.cumsum(dists), 0, 0)
+                total_length = cum_dists[-1]
+                
+                target_positions = np.linspace(0, total_length, 200)
+                uniform_points = []
+                
+                for pos in target_positions:
+                    idx = np.searchsorted(cum_dists, pos) - 1
+                    if idx < 0:
+                        idx = 0
+                    if idx >= len(spline_dense)-1:
+                        uniform_points.append(spline_dense[-1])
+                        continue
+                    
+                    t = (pos - cum_dists[idx]) / (cum_dists[idx+1] - cum_dists[idx])
+                    interp_point = spline_dense[idx] + t * (spline_dense[idx+1] - spline_dense[idx])
+                    uniform_points.append(interp_point)
+                
+                self.uniform_sampling_points[frame_idx] = np.array(uniform_points)
+                success_count += 1
+                
+                # 恢复原始帧索引
+                self.current_index = original_index
+                
+            except Exception as e:
+                failed_frames.append(frame_idx + 1)
+                print(f"帧 {frame_idx} 采样失败: {e}")
+        
+        progress_window.destroy()
+        
+        # 显示结果摘要
+        summary = f"均匀采样完成:\n成功: {success_count} 帧\n失败: {len(failed_frames)} 帧"
+        if failed_frames:
+            summary += f"\n失败的帧: {', '.join(map(str, failed_frames))}"
+        
+        messagebox.showinfo("Results", summary)
+        self.status_var.set(f"均匀采样完成 - 成功: {success_count}, 失败: {len(failed_frames)}")
+
+    # 新增函数：切换均匀采样点的显示
+    def toggle_uniform_points(self):
+        """切换均匀采样点的显示状态"""
+        self.show_uniform_points = not self.show_uniform_points
+        
+        if self.show_uniform_points:
+            self.toggle_uniform_button.config(text="Hide Uniform Points")
+            self.status_var.set("均匀采样点已显示")
+        else:
+            self.toggle_uniform_button.config(text="Show Uniform Points")
+            self.status_var.set("均匀采样点已隐藏")
+        
+        self.update_roi_display()
+
+    # 新增函数：导出均匀采样点数据
+    def export_uniform_points(self):
+        """导出所有帧的均匀采样点数据"""
+        if not self.uniform_sampling_points:
+            messagebox.showwarning("Warning", "没有可导出的均匀采样点数据")
+            return
+        
+        try:
+            # 询问用户要导出像素坐标还是物理坐标
+            if self.has_pixel_spacing:
+                choice = messagebox.askyesno("Export Options", 
+                                            f"当前像素间距: X={self.pixel_spacing[0]:.6f} mm, Y={self.pixel_spacing[1]:.6f} mm\n\n是否导出为物理坐标(mm)?\n选择'否'将导出像素坐标")
+                export_physical = choice
+            else:
+                export_physical = False
+            
+            save_path = filedialog.asksaveasfilename(
+                defaultextension=".npz",
+                filetypes=[("NumPy ZIP Archive", "*.npz"), ("CSV Files", "*.csv"), ("All Files", "*.*")],
+                title="Export Uniform Sampling Points"
+            )
+            
+            if not save_path:
+                return
+            
+            file_ext = os.path.splitext(save_path)[1].lower()
+            
+            if file_ext == '.csv':
+                with open(save_path, 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    # 写入表头
+                    if export_physical:
+                        header = ['frame_index', 'point_index', 'x_mm','y_mm', 'z_mm']
+                    else:
+                        header = ['frame_index', 'point_index', 'x_pixel', 'z_pixel']
+                    writer.writerow(header)
+                    
+                    # 写入数据
+                    for frame_idx in sorted(self.uniform_sampling_points.keys()):
+                        points = self.uniform_sampling_points[frame_idx]
+                        for point_idx, point in enumerate(points):
+                            if export_physical and self.has_pixel_spacing:
+                                # 转换为物理坐标
+                                x_physical = point[0] * self.pixel_spacing[0]+ self.custom_origin_x
+                                y_physical = self.custom_origin_y
+                                z_physical = -point[1] * self.pixel_spacing[1]+ self.custom_origin_z
+                                writer.writerow([frame_idx, point_idx, x_physical,y_physical, z_physical])
+                            else:
+                                # 保持像素坐标
+                                writer.writerow([frame_idx, point_idx, point[0], point[1]])
+                
+                coord_type = "物理坐标(mm)" if export_physical else "像素坐标"
+                messagebox.showinfo("Success", f"均匀采样点已导出为CSV ({coord_type}): {save_path}")
+                
+            else:
+                # 导出为NPZ格式
+                frame_indices = []
+                all_points = []
+                
+                for frame_idx in sorted(self.uniform_sampling_points.keys()):
+                    frame_indices.append(frame_idx)
+                    points = self.uniform_sampling_points[frame_idx]
+                    
+                    if export_physical and self.has_pixel_spacing:
+                        # 转换为物理坐标
+                        points_physical = points.copy()
+                        points_physical[:, 0] = points_physical[:, 0]*self.pixel_spacing[0]+ self.custom_origin_x
+                        points_physical[:, 1] = self.custom_origin_y
+                        points_physical[:, 2] = -points_physical[:, 1]*self.pixel_spacing[1]+ self.custom_origin_z
+
+                        all_points.append(points_physical)
+                    else:
+                        # 保持像素坐标
+                        all_points.append(points)
+                
+                np.savez(
+                    save_path,
+                    frame_indices=np.array(frame_indices),
+                    points=np.array(all_points),
+                    is_physical_coords=export_physical,
+                    pixel_spacing=self.pixel_spacing if self.has_pixel_spacing else None
+                )
+                
+                coord_type = "物理坐标(mm)" if export_physical else "像素坐标"
+                messagebox.showinfo("Success", f"均匀采样点已导出为NPZ ({coord_type}): {save_path}\n包含 {len(frame_indices)} 帧数据")
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"导出失败: {str(e)}")
+
     def split_at_key_points(self, silent=False):
-        """Split the spline curve into two parts based on key points,then evenly divide each curve into 198 segments."""
+        """Split the spline curve into two parts based on key points, then evenly divide each curve into 198 segments."""
         try:
             # 1. check the points
             if not self.validate_key_points():
                 if not silent:
                     messagebox.showwarning("Warning", "please mark key points")
                 return False
+
+            # 2. 在分割前先同步关键点到样条
+            self.sync_keypoints_to_spline(self.current_index)
 
             # 2. generate spline with 1000 points
             points = np.array(self.control_points)
@@ -2518,27 +2888,44 @@ class MRISegmentationApp:
             u_new = np.linspace(0, 1, 1000)
             spline_points = np.array(splev(u_new, tck)).T
 
-            # 3. get the position of key points
+            # 3. 获取关键点数据，但通过样条曲线找到对应的精确位置
             key_data = self.key_points[self.current_index]
-            major_pos = key_data['major']['position']
-            minor_pos = key_data['minor']['position']
+            
+            # 获取关键点对应的控制点索引
+            major_control_idx = key_data['major']['index']
+            minor_control_idx = key_data['minor']['index']
+            
+            # 4. 找到控制点在样条曲线上对应的精确位置
+            def find_spline_position(control_point_idx, control_points, spline_points):
+                """通过控制点找到在样条曲线上对应的精确位置"""
+                if control_point_idx >= len(control_points):
+                    return None
+                    
+                # 获取控制点位置
+                control_point = control_points[control_point_idx]
+                
+                # 在样条曲线上找到最接近的点
+                distances = np.linalg.norm(spline_points - control_point, axis=1)
+                closest_idx = np.argmin(distances)
+                
+                return spline_points[closest_idx], closest_idx
 
-            # 4. Locate the point on the spline nearest to the key point
-            def find_nearest_point_idx(target, points):
-                distances = np.linalg.norm(points - target, axis=1)
-                return np.argmin(distances)
+            # 找到关键点在样条曲线上的精确位置
+            major_pos, major_idx = find_spline_position(major_control_idx, self.control_points, spline_points)
+            minor_pos, minor_idx = find_spline_position(minor_control_idx, self.control_points, spline_points)
 
-            major_idx = find_nearest_point_idx(major_pos, spline_points)
-            minor_idx = find_nearest_point_idx(minor_pos, spline_points)
+            # print(f"关键点控制点索引 - 大弯: {major_control_idx}, 小弯: {minor_control_idx}")
+            # print(f"关键点样条位置 - 大弯: {major_pos}, 索引: {major_idx}")
+            # print(f"关键点样条位置 - 小弯: {minor_pos}, 索引: {minor_idx}")
 
             # 5. split two parts according key points 
             start, end = sorted([major_idx, minor_idx])
             if major_idx < minor_idx:
-                segment1 = spline_points[major_idx:minor_idx+1]
-                segment2 = np.vstack([spline_points[minor_idx:], spline_points[:major_idx+1]])
+                segment1 = spline_points[major_idx:minor_idx+1]  # 大弯到小弯
+                segment2 = np.vstack([spline_points[minor_idx:], spline_points[:major_idx+1]])  # 小弯到大弯（环绕）
             else:
-                segment1 = spline_points[minor_idx:major_idx+1]
-                segment2 = np.vstack([spline_points[major_idx:], spline_points[:minor_idx+1]])
+                segment1 = spline_points[minor_idx:major_idx+1]  # 小弯到大弯
+                segment2 = np.vstack([spline_points[major_idx:], spline_points[:minor_idx+1]])  # 大弯到小弯（环绕）
                 # 交换segment1和segment2以确保segment1总是大弯点到小弯点
                 segment1, segment2 = segment2, segment1
 
@@ -2576,53 +2963,55 @@ class MRISegmentationApp:
                     interp_point = segment[idx] + t * (segment[idx+1] - segment[idx])
                     split_points.append(interp_point)
                 
-                return np.array(split_points),total_length
+                return np.array(split_points), total_length
 
-            split_segment1, greater_length = split_segment(segment1, pixel_spacing=self.pixel_spacing)  # 大弯均分点 + 弧长
-            split_segment2, lesser_length = split_segment(segment2, pixel_spacing=self.pixel_spacing)  # 小弯均分点 + 弧长
+            split_segment1, greater_length = split_segment(segment1, pixel_spacing=self.pixel_spacing)
+            split_segment2, lesser_length = split_segment(segment2, pixel_spacing=self.pixel_spacing)
 
             # 7. 合并结果并标记点类型
             combined = np.vstack([split_segment1, split_segment2[1:-1]])  # 避免重复点
             point_types = np.zeros(len(combined), dtype=int)
             point_types[len(split_segment1):] = 1  # 标记第二部分
             
-            # 标记关键点
-            # for i, point in enumerate(combined):
-            #     if np.allclose(point, major_pos, atol=1.0) or np.allclose(point, minor_pos, atol=1.0):
-            #         point_types[i] = 2
-            # segment1 的长度
-            major_nearest = spline_points[major_idx]  # 原始样条上的最近点
-            minor_nearest = spline_points[minor_idx]
+            # 8. 标记关键点 - 在分割点集中找到对应的关键点位置
+            def find_keypoint_in_combined(keypoint_spline_pos, combined_points):
+                """在分割点集中找到最接近样条关键点的位置"""
+                distances = np.linalg.norm(combined_points - keypoint_spline_pos, axis=1)
+                return np.argmin(distances)
 
-            major_idx_in_combined = np.argmin(np.linalg.norm(combined - major_nearest, axis=1))
-            minor_idx_in_combined = np.argmin(np.linalg.norm(combined - minor_nearest, axis=1))
+            major_combined_idx = find_keypoint_in_combined(major_pos, combined)
+            minor_combined_idx = find_keypoint_in_combined(minor_pos, combined)
+            
+            point_types[major_combined_idx] = 2
+            point_types[minor_combined_idx] = 2
 
-            # 标记关键点
-            point_types[major_idx_in_combined] = 2
-            point_types[minor_idx_in_combined] = 2
+            #print(f"关键点在分割点集中的索引 - 大弯: {major_combined_idx}, 小弯: {minor_combined_idx}")
 
-            # 8. save results
+            # 9. 更新关键点位置为样条曲线上的精确位置
+            self.key_points[self.current_index]['major']['position'] = major_pos.copy()
+            self.key_points[self.current_index]['minor']['position'] = minor_pos.copy()
+
+            # 10. save results
             self.spline_points_per_frame[self.current_index] = {
                 'points': combined,
                 'point_types': point_types,
-                'major_keypoint': major_pos,
+                'major_keypoint': major_pos,  # 保存样条曲线上的精确位置
                 'minor_keypoint': minor_pos,
                 'greater_length': greater_length,
                 'lesser_length': lesser_length,
                 'midpoints': {  
                     'all_midpoints': {'points': [], 'is_keypoint': [], 'endpoints': []},
                     'valid_midpoints': {'points': [], 'is_keypoint': [], 'endpoints': []},
-                    'contour_points': []
+                    'contour_points': spline_points  # 保存完整的样条曲线
                 }
             }
 
-            # 9. update display
+            # 11. update display
             if not silent:
                 self.toggle_split_button.config(state=tk.NORMAL)
-                self.status_var.set(f"曲线已分割为两部分，每部分198个点 (共{len(combined)}点)")
                 # 显示长度信息
                 length_unit = "mm" if self.has_pixel_spacing else "pixels"
-                self.status_var.set(f"Curve in this frame has been split - greater curvature length: {greater_length:.2f} {length_unit}, lesser curvature length: {lesser_length:.2f} {length_unit}")
+                self.status_var.set(f"Curve split - greater: {greater_length:.2f} {length_unit}, lesser: {lesser_length:.2f} {length_unit}")
                 self.update_roi_display()
             
             return True
@@ -2634,43 +3023,80 @@ class MRISegmentationApp:
                 traceback.print_exc()
             return False
 
+    def sync_keypoints_to_spline(self, frame_idx=None):
+        """将关键点位置同步到样条曲线上"""
+        if frame_idx is None:
+            frame_idx = self.current_index
+            
+        if frame_idx not in self.key_points or frame_idx not in self.roi_points:
+            return False
+            
+        try:
+            # 生成样条曲线
+            control_points = self.roi_points[frame_idx]
+            points = np.array(control_points)
+            points = np.vstack([points, points[0]])
+            tck, u = splprep([points[:, 0], points[:, 1]], s=0, per=1)
+            u_new = np.linspace(0, 1, 1000)
+            spline_points = np.array(splev(u_new, tck)).T
+            
+            # 同步每个关键点
+            for ktype, info in self.key_points[frame_idx].items():
+                control_idx = info['index']
+                if control_idx < len(control_points):
+                    control_point = control_points[control_idx]
+                    # 在样条曲线上找到最接近的点
+                    distances = np.linalg.norm(spline_points - control_point, axis=1)
+                    closest_idx = np.argmin(distances)
+                    spline_position = spline_points[closest_idx]
+                    
+                    # 更新关键点位置
+                    self.key_points[frame_idx][ktype]['position'] = spline_position.copy()
+                    print(f"同步关键点 {ktype}: {control_point} -> {spline_position}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"同步关键点到样条失败: {e}")
+            return False
+
     def calculate_average_lengths(self):
-        if not self.spline_points_per_frame:
-            messagebox.showwarning("Warning", "No split data available for computation.")
-            return
+            if not self.spline_points_per_frame:
+                messagebox.showwarning("Warning", "No split data available for computation.")
+                return
 
-        greater_lengths = []
-        lesser_lengths = []
+            greater_lengths = []
+            lesser_lengths = []
 
-        for frame_data in self.spline_points_per_frame.values():
-            major_length = frame_data.get('greater_length', 0.0)
-            minor_length = frame_data.get('lesser_length', 0.0)
-            if major_length > 0 and minor_length > 0:
-                greater_lengths.append(major_length)
-                lesser_lengths.append(minor_length)
+            for frame_data in self.spline_points_per_frame.values():
+                major_length = frame_data.get('greater_length', 0.0)
+                minor_length = frame_data.get('lesser_length', 0.0)
+                if major_length > 0 and minor_length > 0:
+                    greater_lengths.append(major_length)
+                    lesser_lengths.append(minor_length)
 
-        if not greater_lengths or not lesser_lengths:
-            messagebox.showwarning("Warning", "not found valild length data, please split")
-            return
+            if not greater_lengths or not lesser_lengths:
+                messagebox.showwarning("Warning", "not found valild length data, please split")
+                return
 
-        avg_major = np.mean(greater_lengths)
-        avg_minor = np.mean(lesser_lengths)
+            avg_major = np.mean(greater_lengths)
+            avg_minor = np.mean(lesser_lengths)
 
-        ave_major_point_spcaing=avg_major/199
-        avg_minor_point_spcaing=avg_minor/199
+            ave_major_point_spcaing=avg_major/199
+            avg_minor_point_spcaing=avg_minor/199
 
-        spacing_info = ""
-        if self.has_pixel_spacing:
-            spacing_x, spacing_y = self.pixel_spacing
-            spacing_info = f"\n\nCurrent Pixel Spacing:\nX={spacing_x:.4f} mm/pixel, Y={spacing_y:.4f} mm/pixel"
+            spacing_info = ""
+            if self.has_pixel_spacing:
+                spacing_x, spacing_y = self.pixel_spacing
+                spacing_info = f"\n\nCurrent Pixel Spacing:\nX={spacing_x:.6f} mm/pixel, Y={spacing_y:.6f} mm/pixel"
 
 
-        messagebox.showinfo("average length",
-            f"Greater Curvature Avergae Length: {avg_major:.2f} mm\n"
-            f"Greater Curvature Avergae Point Spacing: {ave_major_point_spcaing:.2f} mm\n"
-            f"Lesser Curvature Avergae Length: {avg_minor:.2f} mm\n"
-            f"Lesser Curvature Avergae Point Spacing: {avg_minor_point_spcaing:.2f} mm\n"
-            + spacing_info)
+            messagebox.showinfo("average length",
+                f"Greater Curvature Avergae Length: {avg_major:.2f} mm\n"
+                f"Greater Curvature Avergae Point Spacing: {ave_major_point_spcaing:.2f} mm\n"
+                f"Lesser Curvature Avergae Length: {avg_minor:.2f} mm\n"
+                f"Lesser Curvature Avergae Point Spacing: {avg_minor_point_spcaing:.2f} mm\n"
+                + spacing_info)
 
     def split_all_frames(self):
         if not self.key_points:
@@ -2840,6 +3266,23 @@ class MRISegmentationApp:
         if len(self.control_points) >= 3:
             self.draw_spline()
 
+        # 添加均匀采样点的显示
+        if (self.show_uniform_points and 
+            self.current_index in self.uniform_sampling_points and 
+            len(self.uniform_sampling_points[self.current_index]) > 0):
+            
+            uniform_points = self.uniform_sampling_points[self.current_index]
+            self.ax.scatter(
+                uniform_points[:, 0], uniform_points[:, 1],
+                c='orange', s=15, marker='o', alpha=0.7,
+                label='Uniform Points'
+            )
+        # 确保图例更新
+        if any([self.show_uniform_points and self.current_index in self.uniform_sampling_points,
+                len(self.control_points) > 0,
+                self.current_index in self.spline_points_per_frame and self.show_split_points]):
+            self.ax.legend(loc='upper right')
+
         if self.current_index in self.spline_points_per_frame and self.show_split_points:
             data = self.spline_points_per_frame[self.current_index]
             split_points = data['points']
@@ -2861,6 +3304,19 @@ class MRISegmentationApp:
                             markersize=markersize, 
                             markerfacecolor='none', 
                             markeredgewidth=1)
+                
+                # 添加编号文本（只对普通点显示编号，关键点不显示）
+                if ptype in [0, 1]:  # 只对普通wall点显示编号
+                    if i in [10, 20, 40,50,60,70,80,90,100,110,120,210,220,230,240,250,260,280,290,300]:
+                        # 稍微偏移文本位置，避免与点重叠
+                        text_offset_x = 2
+                        text_offset_y = 2
+                        self.ax.text(point[0] + text_offset_x, 
+                                    point[1] + text_offset_y, 
+                                    str(int(i)),  # 转换为整数
+                                    fontsize=6, 
+                                    color='white',
+                                    bbox=dict(boxstyle="round,pad=0.1", facecolor=color, alpha=0.7))
 
         if (self.current_index in self.spline_points_per_frame and 
             self.show_midpoints and 
@@ -2990,6 +3446,14 @@ class MRISegmentationApp:
         if self.is_editing and self.selected_point is not None:
             # Update the selected control point position
             self.control_points[self.selected_point] = [event.xdata, event.ydata]
+            
+            # 如果移动的点是关键点，标记需要重新同步
+            if self.current_index in self.key_points:
+                for ktype, info in self.key_points[self.current_index].items():
+                    if info['index'] == self.selected_point:
+                        print(f"关键点 {ktype} 的控制点已移动，下次分割时将同步到样条")
+                        # 这里不立即更新位置，等分割时再同步到样条
+            
             self.update_roi_display()
 
     def find_closest_point(self, x, y, threshold=10):
@@ -3080,6 +3544,8 @@ class MRISegmentationApp:
         'points' in self.spline_points_per_frame[self.current_index] and
         'point_types' in self.spline_points_per_frame[self.current_index]
         )
+        has_roi = self.current_index in self.roi_points and len(self.roi_points[self.current_index]) > 0
+        has_uniform_points = self.current_index in self.uniform_sampling_points
         
         if has_roi:
             self.clear_button.config(state=tk.NORMAL)
@@ -3101,6 +3567,10 @@ class MRISegmentationApp:
                                 'midpoints' in self.spline_points_per_frame[self.current_index]) 
                 else tk.DISABLED
             )
+            self.uniform_current_button.config(state=tk.NORMAL)
+            self.uniform_all_button.config(state=tk.NORMAL)
+            self.export_uniform_button.config(state=tk.NORMAL if self.uniform_sampling_points else tk.DISABLED)
+            self.toggle_uniform_button.config(state=tk.NORMAL if has_uniform_points else tk.DISABLED)
             
         else:
             self.clear_button.config(state=tk.DISABLED)
@@ -3114,6 +3584,11 @@ class MRISegmentationApp:
             self.toggle_control_button.config(state=tk.DISABLED)
             self.calc_midpoints_button.config(state=tk.DISABLED)
             self.calc_all_midpoints_button.config(state=tk.DISABLED)
+            # 新增：均匀采样按钮状态
+            self.uniform_current_button.config(state=tk.DISABLED)
+            self.uniform_all_button.config(state=tk.DISABLED)
+            self.export_uniform_button.config(state=tk.DISABLED)
+            self.toggle_uniform_button.config(state=tk.DISABLED)
 
     def export_images_with_rois(self):
         """export images with contour"""
@@ -3390,7 +3865,7 @@ class MRISegmentationApp:
             
             # 验证逻辑
             distance = np.linalg.norm(minor_pt - major_pt)
-            radius = distance * 0.9 / 2
+            radius = distance * 0.8 / 2
             angles = np.deg2rad(np.arange(0, 360, 15))
             circle_pts = np.column_stack([
                 midpoint[0] + radius * np.cos(angles),
@@ -3496,10 +3971,12 @@ class MRISegmentationApp:
             messagebox.showerror("Error", "Calculate failed for all frames")
 
     def fit_polynomial_to_midpoints(self):
-        """Fit the midpoints of all time steps using a quintic polynomial"""
+        """通过五次多项式拟合所有时间步的有效中点，然后调整端点对齐关键点"""
         try:
-            # 1. collect all midpoints
+            # 1. 收集所有有效中点和关键点
             all_midpoints = []
+            all_major_points = []  # 大弯关键点
+            all_minor_points = []  # 小弯关键点
             frame_indices = []
             
             for frame_idx in sorted(self.spline_points_per_frame.keys()):
@@ -3507,61 +3984,285 @@ class MRISegmentationApp:
                     continue
                     
                 mid_data = self.spline_points_per_frame[frame_idx]['midpoints']
+                if 'valid_midpoints' not in mid_data or len(mid_data['valid_midpoints']['points']) == 0:
+                    continue
+                    
+                valid_midpoints = mid_data['valid_midpoints']['points']
+                all_midpoints.append(valid_midpoints)
+                frame_indices.append(frame_idx)
                 
-                # use all midpoints not the valid points
-                if 'all_midpoints' in mid_data and len(mid_data['all_midpoints']['points']) > 0:
-                    all_midpoints.append(mid_data['all_midpoints']['points'])
-                    frame_indices.append(frame_idx)
+                # 收集关键点
+                if frame_idx in self.key_points:
+                    key_data = self.key_points[frame_idx]
+                    if 'major' in key_data:
+                        all_major_points.append(key_data['major']['position'])
+                    if 'minor' in key_data:
+                        all_minor_points.append(key_data['minor']['position'])
             
             if len(all_midpoints) < 3:
-                messagebox.showwarning("Warning", "Too few frames to fit the centreline. Please check")
+                messagebox.showwarning("Warning", "at least 3 frames to fitting the centerline")
+                return
+            
+            if len(all_major_points) == 0 or len(all_minor_points) == 0:
+                messagebox.showwarning("Warning", "need keypoints to adjust the endpoints")
                 return
             
             # 2. 合并所有帧的中点
             combined_midpoints = np.vstack(all_midpoints)
             
-            # 3. 定义五阶多项式函数
+            # 3. 计算关键点的平均位置
+            avg_major = np.mean(all_major_points, axis=0)
+            avg_minor = np.mean(all_minor_points, axis=0)
+            
+            print(f"average greater key point: {avg_major}")
+            print(f"average lesser key point: {avg_minor}")
+            
+            # 4. 使用所有中点拟合五阶多项式（不考虑关键点约束）
             def polynomial_5th_order(x, a, b, c, d, e, f):
                 return a*x**5 + b*x**4 + c*x**3 + d*x**2 + e*x + f
             
-            # 4. 提取x和y坐标
             x = combined_midpoints[:, 0]
             y = combined_midpoints[:, 1]
             
-            # 5. 拟合五阶多项式
+            # 初始拟合
             popt, pcov = curve_fit(polynomial_5th_order, x, y)
             
-            # 6. 生成200个等间距点的中心线
-            x_line = np.linspace(x.min()*1.03, x.max()*0.99, 200)
+            # 5. 生成初始中心线（基于中点拟合）
+            x_min, x_max = x.min(), x.max()
+            x_range = x_max - x_min
+            x_start = x_min - 0.1 * x_range
+            x_end = x_max + 0.1 * x_range
+            
+            x_line = np.linspace(x_start, x_end, 200)
             y_line = polynomial_5th_order(x_line, *popt)
-            centerline_points = np.column_stack((x_line, y_line))
+            initial_centerline = np.column_stack((x_line, y_line))
+            
+            # 6. 调整中心线端点使其接近关键点平均位置
+            centerline_points = self.adjust_centerline_endpoints(initial_centerline, avg_major, avg_minor)
             
             # 7. 保存结果
             self.centerline_data = {
                 'fitted_coefficients': popt,
                 'covariance_matrix': pcov,
                 'centerline_points': centerline_points,
+                'initial_centerline': initial_centerline,  # 保存初始中心线用于比较
                 'frame_indices': frame_indices,
-                'original_midpoints': all_midpoints
+                'original_midpoints': all_midpoints,
+                'average_major': avg_major,
+                'average_minor': avg_minor,
+                'all_major_points': all_major_points,
+                'all_minor_points': all_minor_points
             }
             
-            # 确保 centerline_plots 已初始化
-            if not hasattr(self, 'centerline_plots'):
-                self.centerline_plots = []
-
             # 8. 可视化结果
-            self.visualize_centerline()
+            self.visualize_adjusted_centerline()
             
             # 9. 显示成功消息
+            start_error = np.linalg.norm(centerline_points[0] - avg_major)
+            end_error = np.linalg.norm(centerline_points[-1] - avg_minor)
+            initial_start_error = np.linalg.norm(initial_centerline[0] - avg_major)
+            initial_end_error = np.linalg.norm(initial_centerline[-1] - avg_minor)
+            
             messagebox.showinfo("Success", 
-                f"- frames: {len(all_midpoints)}\n"
+                f"fitting centerline:\n"
+                f"- frame number: {len(all_midpoints)}\n"
                 f"- all midpoints: {len(combined_midpoints)}\n"
-                f"- points of centreline: 200")
-        
+                f"- Endpoint error improvement: {initial_start_error:.2f}->{start_error:.2f}px, "
+                f"{initial_end_error:.2f}→{end_error:.2f}px")
+
         except Exception as e:
-            messagebox.showerror("Error", f"Centreline fitting failed: {str(e)}")
+            messagebox.showerror("Error", f"Failur to fitting the centerline: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def adjust_centerline_endpoints(self, centerline, avg_major, avg_minor):
+        """调整中心线端点使其接近关键点平均位置"""
+        
+        # 方法1: 找到中心线上离关键点最近的点作为新端点
+        def find_closest_point_on_curve(target, curve):
+            distances = np.linalg.norm(curve - target, axis=1)
+            return np.argmin(distances)
+        
+        closest_to_major = find_closest_point_on_curve(avg_major, centerline)
+        closest_to_minor = find_closest_point_on_curve(avg_minor, centerline)
+        
+        # 确保两个端点不同且顺序正确
+        if closest_to_major == closest_to_minor:
+            # 如果找到同一个点，选择相邻点
+            if closest_to_major > 0:
+                closest_to_minor = closest_to_major - 1
+            else:
+                closest_to_minor = closest_to_major + 1
+        
+        # 确定起点和终点
+        if closest_to_major < closest_to_minor:
+            start_idx, end_idx = closest_to_major, closest_to_minor
+            start_target, end_target = avg_major, avg_minor
+        else:
+            start_idx, end_idx = closest_to_minor, closest_to_major
+            start_target, end_target = avg_minor, avg_major
+        
+        # 裁剪中心线，只保留两个关键点之间的部分
+        if end_idx - start_idx > 10:  # 确保有足够的点
+            cropped_centerline = centerline[start_idx:end_idx+1]
+        else:
+            # 如果点太少，使用整个中心线
+            cropped_centerline = centerline.copy()
+            start_idx, end_idx = 0, len(centerline)-1
+        
+        # 方法2: 使用样条插值重新参数化，确保端点精确对齐
+        from scipy.interpolate import CubicSpline
+        
+        # 计算累积弧长
+        diffs = np.diff(cropped_centerline, axis=0)
+        dists = np.linalg.norm(diffs, axis=1)
+        cum_dists = np.insert(np.cumsum(dists), 0, 0)
+        total_length = cum_dists[-1]
+        
+        # 创建新的参数化，强制端点对齐
+        new_arc_lengths = np.linspace(0, total_length, 200)
+        
+        # 使用三次样条插值
+        try:
+            # 对x坐标插值
+            cs_x = CubicSpline(cum_dists, cropped_centerline[:, 0])
+            # 对y坐标插值
+            cs_y = CubicSpline(cum_dists, cropped_centerline[:, 1])
+            
+            new_x = cs_x(new_arc_lengths)
+            new_y = cs_y(new_arc_lengths)
+            
+            adjusted_centerline = np.column_stack((new_x, new_y))
+        except:
+            # 如果样条插值失败，使用线性插值
+            from scipy.interpolate import interp1d
+            f_x = interp1d(cum_dists, cropped_centerline[:, 0], kind='linear')
+            f_y = interp1d(cum_dists, cropped_centerline[:, 1], kind='linear')
+            new_x = f_x(new_arc_lengths)
+            new_y = f_y(new_arc_lengths)
+            adjusted_centerline = np.column_stack((new_x, new_y))
+        
+        # 方法3: 微调端点位置使其更接近目标
+        # 将端点精确设置为关键点位置
+        adjusted_centerline[0] = start_target
+        adjusted_centerline[-1] = end_target
+        
+        # 平滑过渡以避免尖锐的端点
+        n_smooth = min(5, len(adjusted_centerline) // 10)  # 平滑前5个点
+        for i in range(1, n_smooth):
+            alpha = i / n_smooth
+            adjusted_centerline[i] = (1 - alpha) * start_target + alpha * adjusted_centerline[i]
+            adjusted_centerline[-(i+1)] = (1 - alpha) * end_target + alpha * adjusted_centerline[-(i+1)]
+        
+        return adjusted_centerline
+
+    def visualize_adjusted_centerline(self):
+        """可视化调整后的中心线"""
+        if not hasattr(self, 'centerline_data') or not self.show_centerline:
+            return
+        
+        # 清除之前绘制的中心线
+        for artist in self.centerline_plots:
+            try:
+                if artist in self.ax.lines or artist in self.ax.collections:
+                    artist.remove()
+            except:
+                pass
+        self.centerline_plots = []
+        
+        # 获取数据
+        centerline_points = self.centerline_data['centerline_points']
+        initial_centerline = self.centerline_data['initial_centerline']
+        avg_major = self.centerline_data['average_major']
+        avg_minor = self.centerline_data['average_minor']
+        
+        # 绘制初始中心线（浅色）
+        initial_line, = self.ax.plot(
+            initial_centerline[:, 0], initial_centerline[:, 1],
+            'gray', linewidth=2, alpha=0.5, linestyle='--',
+            label='Initial Centerline'
+        )
+        self.centerline_plots.append(initial_line)
+        
+        # 绘制调整后的中心线
+        adjusted_line, = self.ax.plot(
+            centerline_points[:, 0], centerline_points[:, 1],
+            'r-', linewidth=4, 
+            label='Adjusted Centerline'
+        )
+        self.centerline_plots.append(adjusted_line)
+        
+        # 绘制关键点平均位置
+        major_scatter = self.ax.scatter(
+            avg_major[0], avg_major[1], 
+            c='gold', s=150, marker='*', 
+            edgecolors='black', linewidth=2,
+            zorder=5,
+            label='Average Major Bend'
+        )
+        self.centerline_plots.append(major_scatter)
+        
+        minor_scatter = self.ax.scatter(
+            avg_minor[0], avg_minor[1],
+            c='cyan', s=150, marker='*',
+            edgecolors='black', linewidth=2,
+            zorder=5,
+            label='Average Minor Bend'
+        )
+        self.centerline_plots.append(minor_scatter)
+        
+        # 绘制中心线端点
+        start_point = self.ax.scatter(
+            centerline_points[0, 0], centerline_points[0, 1],
+            c='red', s=100, marker='o', 
+            edgecolors='black', linewidth=2,
+            zorder=6,
+            label='Centerline Start'
+        )
+        self.centerline_plots.append(start_point)
+        
+        end_point = self.ax.scatter(
+            centerline_points[-1, 0], centerline_points[-1, 1],
+            c='blue', s=100, marker='o',
+            edgecolors='black', linewidth=2,
+            zorder=6,
+            label='Centerline End'
+        )
+        self.centerline_plots.append(end_point)
+        
+        # 绘制所有关键点分布
+        all_major_points = self.centerline_data['all_major_points']
+        all_minor_points = self.centerline_data['all_minor_points']
+        
+        if len(all_major_points) > 0:
+            major_array = np.array(all_major_points)
+            self.ax.scatter(
+                major_array[:, 0], major_array[:, 1],
+                c='gold', s=30, alpha=0.4, marker='^',
+                label='All Major Points'
+            )
+        
+        if len(all_minor_points) > 0:
+            minor_array = np.array(all_minor_points)
+            self.ax.scatter(
+                minor_array[:, 0], minor_array[:, 1],
+                c='cyan', s=30, alpha=0.4, marker='v',
+                label='All Minor Points'
+            )
+        
+        # 添加图例
+        self.ax.legend(loc='upper right')
+        
+        # 更新显示
+        self.canvas.draw()
+        
+        # 计算误差
+        start_error = np.linalg.norm(centerline_points[0] - avg_major)
+        end_error = np.linalg.norm(centerline_points[-1] - avg_minor)
+        
+        self.status_var.set(
+            f"中心线调整完成 - 端点误差: 大弯{start_error:.2f}px, 小弯{end_error:.2f}px"
+        )
 
     def visualize_centerline(self):
         if not hasattr(self, 'centerline_data') or not self.show_centerline:
@@ -4008,6 +4709,235 @@ class MRISegmentationApp:
             self.control_points.pop(index)
             self.update_roi_display()
 
+    def temporal_smoothing(self, window_size=3):
+        """对控制点和关键点进行时间序列光顺"""
+        if len(self.roi_points) < window_size:
+            messagebox.showwarning("Warning", "帧数太少，无法进行时间平滑")
+            return
+        
+        try:
+            # 对控制点进行时间平滑
+            sorted_frames = sorted(self.roi_points.keys())
+            smoothed_roi_points = {}
+            
+            for i, frame_idx in enumerate(sorted_frames):
+                # 获取时间窗口内的帧
+                start_idx = max(0, i - window_size // 2)
+                end_idx = min(len(sorted_frames), i + window_size // 2 + 1)
+                window_frames = sorted_frames[start_idx:end_idx]
+                
+                # 对每个控制点进行时间平均
+                n_points = len(self.roi_points[frame_idx])
+                smoothed_points = np.zeros((n_points, 2))
+                
+                for point_idx in range(n_points):
+                    point_values = []
+                    for win_frame in window_frames:
+                        if win_frame in self.roi_points and point_idx < len(self.roi_points[win_frame]):
+                            point_values.append(self.roi_points[win_frame][point_idx])
+                    
+                    if point_values:
+                        smoothed_points[point_idx] = np.mean(point_values, axis=0)
+                
+                smoothed_roi_points[frame_idx] = smoothed_points
+            
+            # 更新ROI点
+            self.roi_points = smoothed_roi_points
+            
+            # 对关键点进行时间平滑（如果存在）
+            if self.key_points:
+                smoothed_key_points = {}
+                
+                for i, frame_idx in enumerate(sorted_frames):
+                    if frame_idx not in self.key_points:
+                        continue
+                        
+                    start_idx = max(0, i - window_size // 2)
+                    end_idx = min(len(sorted_frames), i + window_size // 2 + 1)
+                    window_frames = sorted_frames[start_idx:end_idx]
+                    
+                    major_positions = []
+                    minor_positions = []
+                    
+                    for win_frame in window_frames:
+                        if (win_frame in self.key_points and 
+                            'major' in self.key_points[win_frame] and 
+                            'minor' in self.key_points[win_frame]):
+                            major_positions.append(self.key_points[win_frame]['major']['position'])
+                            minor_positions.append(self.key_points[win_frame]['minor']['position'])
+                    
+                    if major_positions and minor_positions:
+                        smoothed_major = np.mean(major_positions, axis=0)
+                        smoothed_minor = np.mean(minor_positions, axis=0)
+                        
+                        # 找到最近的控制点索引
+                        major_idx = self.find_closest_control_point(smoothed_major)
+                        minor_idx = self.find_closest_control_point(smoothed_minor)
+                        
+                        smoothed_key_points[frame_idx] = {
+                            'major': {'index': major_idx, 'position': smoothed_major},
+                            'minor': {'index': minor_idx, 'position': smoothed_minor}
+                        }
+                
+                self.key_points = smoothed_key_points
+            
+            self.display_current_image()
+            messagebox.showinfo("Success", f"时间平滑完成 (窗口大小: {window_size})")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"时间平滑失败: {str(e)}")
+
+    def optimize_motion_consistency(self):
+        """使用光流优化运动一致性（带详细调试信息）"""
+        if len(self.image_files) < 3:
+            messagebox.showwarning("Warning", "需要至少3帧图像才能进行运动优化")
+            return
+        
+        try:
+            print("开始运动一致性优化...")
+            
+            # 1. 检查ROI数据
+            roi_frames = sorted([idx for idx in self.roi_points.keys() if len(self.roi_points[idx]) > 0])
+            print(f"找到 {len(roi_frames)} 帧有ROI数据: {roi_frames}")
+            
+            if len(roi_frames) < 2:
+                messagebox.showwarning("Warning", "需要至少2帧有ROI数据才能优化")
+                return
+            
+            # 2. 计算光流
+            flows = []
+            print("开始计算光流...")
+            
+            for i in range(len(self.image_files) - 1):
+                try:
+                    print(f"计算第 {i} 帧到第 {i+1} 帧的光流...")
+                    current_frame = Image.open(self.image_files[i]).convert('L')
+                    next_frame = Image.open(self.image_files[i + 1]).convert('L')
+                    
+                    current_array = np.array(current_frame)
+                    next_array = np.array(next_frame)
+                    
+                    print(f"图像尺寸 - 当前帧: {current_array.shape}, 下一帧: {next_array.shape}")
+                    
+                    # 检查图像尺寸是否一致
+                    if current_array.shape != next_array.shape:
+                        print(f"警告: 第 {i} 帧和第 {i+1} 帧尺寸不一致，调整尺寸...")
+                        # 调整到相同尺寸
+                        min_height = min(current_array.shape[0], next_array.shape[0])
+                        min_width = min(current_array.shape[1], next_array.shape[1])
+                        current_array = current_array[:min_height, :min_width]
+                        next_array = next_array[:min_height, :min_width]
+                    
+                    flow = cv2.calcOpticalFlowFarneback(
+                        current_array, next_array, None,
+                        pyr_scale=0.5, levels=3, winsize=15, iterations=3,
+                        poly_n=5, poly_sigma=1.2, flags=0
+                    )
+                    
+                    if flow is None:
+                        print(f"错误: 第 {i} 帧光流计算返回None")
+                        flows.append(None)
+                    else:
+                        print(f"光流计算成功 - 形状: {flow.shape}")
+                        flows.append(flow)
+                        
+                except Exception as e:
+                    print(f"计算第 {i} 帧光流时出错: {str(e)}")
+                    flows.append(None)
+            
+            print(f"成功计算 {len([f for f in flows if f is not None])}/{len(flows)} 个光流")
+            
+            # 3. 优化运动一致性
+            optimized_count = 0
+            failed_frames = []
+            
+            # 从第二帧开始优化（索引1）
+            for i in range(1, len(self.image_files)):
+                if i not in self.roi_points:
+                    print(f"跳过第 {i} 帧: 无ROI数据")
+                    continue
+                
+                if len(self.roi_points[i]) == 0:
+                    print(f"跳过第 {i} 帧: ROI数据为空")
+                    continue
+                
+                if (i-1) not in self.roi_points:
+                    print(f"跳过第 {i} 帧: 前一帧无ROI数据")
+                    continue
+                
+                if (i-1) >= len(flows) or flows[i-1] is None:
+                    print(f"跳过第 {i} 帧: 无有效光流数据")
+                    continue
+                
+                try:
+                    flow = flows[i-1]
+                    prev_points = self.roi_points[i-1]
+                    current_points = self.roi_points[i]
+                    
+                    print(f"优化第 {i} 帧 - 前一帧点数: {len(prev_points)}, 当前帧点数: {len(current_points)}")
+                    
+                    # 检查点数是否一致
+                    if len(prev_points) != len(current_points):
+                        print(f"警告: 第 {i-1} 帧和第 {i} 帧点数不一致 ({len(prev_points)} vs {len(current_points)})")
+                        # 使用较小的点数
+                        min_points = min(len(prev_points), len(current_points))
+                        prev_points = prev_points[:min_points]
+                        current_points = current_points[:min_points]
+                    
+                    predicted_points = []
+                    valid_predictions = 0
+                    
+                    for j, point in enumerate(prev_points):
+                        x, y = point
+                        
+                        # 检查坐标是否在图像范围内
+                        if (0 <= y < flow.shape[0] and 0 <= x < flow.shape[1]):
+                            dx = flow[int(y), int(x), 0]
+                            dy = flow[int(y), int(x), 1]
+                            
+                            # 检查光流值是否合理
+                            if abs(dx) < 100 and abs(dy) < 100:  # 合理的位移阈值
+                                predicted_points.append([x + dx, y + dy])
+                                valid_predictions += 1
+                            else:
+                                print(f"第 {i} 帧点 {j} 光流值异常: dx={dx:.2f}, dy={dy:.2f}")
+                                predicted_points.append(point)  # 使用原始点
+                        else:
+                            print(f"第 {i} 帧点 {j} 坐标超出范围: ({x:.1f}, {y:.1f})")
+                            predicted_points.append(point)  # 使用原始点
+                    
+                    print(f"第 {i} 帧有效预测: {valid_predictions}/{len(prev_points)}")
+                    
+                    if valid_predictions > len(prev_points) * 0.5:  # 至少50%有效预测
+                        # 与手动标注融合
+                        blended_points = 0.7 * np.array(current_points) + 0.3 * np.array(predicted_points)
+                        self.roi_points[i] = blended_points
+                        optimized_count += 1
+                        print(f"第 {i} 帧优化成功")
+                    else:
+                        failed_frames.append(i)
+                        print(f"第 {i} 帧优化失败: 有效预测点太少")
+                        
+                except Exception as e:
+                    print(f"优化第 {i} 帧时出错: {str(e)}")
+                    failed_frames.append(i)
+            
+            # 4. 显示结果
+            self.display_current_image()
+            
+            result_message = f"运动一致性优化完成\n优化帧数: {optimized_count}"
+            if failed_frames:
+                result_message += f"\n失败帧: {failed_frames}"
+            
+            messagebox.showinfo("Success", result_message)
+            print(f"优化完成: {optimized_count} 帧成功, {len(failed_frames)} 帧失败")
+            
+        except Exception as e:
+            error_msg = f"运动优化失败: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", error_msg)
 
 # Main application loop
 if __name__ == "__main__":
