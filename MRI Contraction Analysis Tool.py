@@ -20,227 +20,6 @@ import csv
 N_REGIONS = 20  # number of regions for contraction analysis
 OUTPUT_DPI = 600  # resolution for saved figures
 
-# analyse contraction
-def export_wave_data(wave_interpolated_points, region_boundaries, 
-                    point_spacing_mm, frame_duration_s, curvature_type="lesser"):
-    """
-    check if a wave stictly passes through a single region 
-    """
-    os.makedirs('results', exist_ok=True)
-    
-    region_speed_data = {}
-    for i in range(len(region_boundaries) - 1):
-        region_start = region_boundaries[i]
-        region_end = region_boundaries[i + 1]
-        # skip the initial and end region 
-        if i == 0 or i == len(region_boundaries) - 2:
-            continue
-        region_speed_data[(region_start, region_end)] = []
-
-    # process boundary point
-    for wave_id, wave_data in wave_interpolated_points.items():
-        boundary_points = wave_data['boundary_points']
-        if len(boundary_points) < 2:
-            continue  # at least two points can be used to calculate speed
-
-        sorted_boundary_points = sorted(boundary_points, key=lambda x: x[1])
-        
-        # check if a wave passes through a single region
-        for i in range(len(region_boundaries) - 1):
-            region_start = region_boundaries[i]
-            region_end = region_boundaries[i + 1]
-            
-            if i == 0 or i == len(region_boundaries) - 2:
-                continue
-                
-            entry_point = None
-            exit_point = None
-            
-            for t, p in sorted_boundary_points:
-                if p >= region_start and p < region_end and entry_point is None:
-                    entry_point = (t, p)
-                elif p >= region_end and exit_point is None:
-                    exit_point = (t, p)
-                    break
-            
-            # 只有当有进入和离开点时才计算速度
-            if entry_point and exit_point:
-                t1, p1 = entry_point
-                t2, p2 = exit_point
-                
-                # calculate velocity (mm/s)
-                distance_mm = abs(p2 - p1) * point_spacing_mm
-                time_s = abs(t2 - t1) * frame_duration_s
-                speed = distance_mm / time_s if time_s > 0 else 0
-                
-                region_speed_data[(region_start, region_end)].append({
-                    'wave_id': wave_id,
-                    'speed': speed,
-                    'time_start': t1 * frame_duration_s,
-                    'time_end': t2 * frame_duration_s
-                })
-
-    # export CSV
-    with open(f'results/{curvature_type}_region_speeds.csv', 'w') as f:
-        f.write("region_id,region_start,region_end,avg_speed_mm_s,num_waves,wave_details\n")
-        for region_id, ((start, end), speeds) in enumerate(region_speed_data.items(), 1):
-            if speeds:
-                avg_speed = np.mean([s['speed'] for s in speeds])
-                wave_details = ";".join([
-                    f"wave{s['wave_id']}:{s['speed']:.2f}:{s['time_start']:.2f}-{s['time_end']:.2f}"
-                    for s in speeds
-                ])
-                num_waves = len(speeds)
-            else:
-                avg_speed = 0
-                wave_details = ""
-                num_waves = 0
-            
-            f.write(f"{region_id},{start},{end},{avg_speed:.2f},{num_waves},{wave_details}\n")
-
-def calculate_wave_contraction_stats(contraction_sizes, wave_interpolated_points, region_boundaries):
-    """
-    calculate the contraction size of wave that through the region
-    """
-    # Initialize region data storage
-    region_wave_data = {}
-    
-    # First identify which waves fully cross which regions
-    valid_wave_regions = {}  # {wave_id: [valid_region_keys]}
-    
-    for wave_id, wave_data in wave_interpolated_points.items():
-        boundary_points = wave_data['boundary_points']
-        if len(boundary_points) < 2:
-            continue
-            
-        # Sort boundary points by position
-        sorted_boundary = sorted(boundary_points, key=lambda x: x[1])
-        
-        valid_regions = []
-        for i in range(len(region_boundaries) - 1):
-            region_start = region_boundaries[i]
-            region_end = region_boundaries[i + 1]
-            
-            # Skip first and last regions
-            if i == 0 or i == len(region_boundaries) - 2:
-                continue
-                
-            # Check if wave enters and exits this region
-            has_entry = False
-            has_exit = False
-            
-            for t, p in sorted_boundary:
-                if not has_entry and region_start <= p < region_end:
-                    has_entry = True
-                elif has_entry and p >= region_end:
-                    has_exit = True
-                    break
-                    
-            if has_entry and has_exit:
-                valid_regions.append((region_start, region_end))
-                
-        valid_wave_regions[wave_id] = valid_regions
-    
-    # Now calculate contraction stats only for valid wave-region pairs
-    for wave_id, wave_data in wave_interpolated_points.items():
-        if wave_id not in valid_wave_regions:
-            continue
-            
-        valid_regions = valid_wave_regions[wave_id]
-        internal_points = wave_data['internal_points']
-        
-        for region_key in valid_regions:
-            # Initialize this region if needed
-            if region_key not in region_wave_data:
-                region_wave_data[region_key] = {
-                    'wave_contractions': {}
-                }
-            
-            # Initialize this wave if needed
-            if wave_id not in region_wave_data[region_key]['wave_contractions']:
-                region_wave_data[region_key]['wave_contractions'][wave_id] = []
-            
-            # Add contraction values for points in this region
-            if region_key in internal_points:
-                for time, pos in internal_points[region_key]:
-                    frame = int(round(time))
-                    pos_rounded = int(round(pos))
-                    
-                    if (0 <= frame < contraction_sizes.shape[0] and 
-                        0 <= pos_rounded < contraction_sizes.shape[1]):
-                        region_wave_data[region_key]['wave_contractions'][wave_id].append(
-                            contraction_sizes[frame, pos_rounded]
-                        )
-    
-    return region_wave_data
-
-def export_region_wave_contraction_stats(contraction_sizes, wave_interpolated_points, 
-                                       region_boundaries, curvature_type="lesser"):
-    """
-    Export wave contraction statistics for each region using pre-calculated points.
-    
-    Args:
-        contraction_sizes: Contraction size matrix
-        wave_interpolated_points: Dictionary with pre-calculated points
-        region_boundaries: Array of region boundary positions
-        curvature_type: "lesser" or "greater"
-    """
-    os.makedirs('results', exist_ok=True)
-    
-    # Calculate wave contraction statistics using pre-calculated points
-    region_wave_data = calculate_wave_contraction_stats(
-        contraction_sizes=contraction_sizes, 
-        wave_interpolated_points=wave_interpolated_points,
-        region_boundaries=region_boundaries
-    )
-    
-    # Prepare data for export
-    region_stats = []
-    for region_id, (region_key, data) in enumerate(sorted(region_wave_data.items()), 1):
-        region_start, region_end = region_key
-        wave_contractions = data['wave_contractions']
-        num_waves = len(wave_contractions)
-        
-        # Calculate overall average contraction across all waves
-        all_contractions = []
-        for wave_id, contractions in wave_contractions.items():
-            all_contractions.extend(contractions)
-        
-        if all_contractions:
-            avg_contraction = np.mean(all_contractions)
-        else:
-            avg_contraction = 0
-        
-        # Create wave details string with wave ID and its average contraction
-        wave_details = []
-        for wave_id, contractions in sorted(wave_contractions.items()):
-            if contractions:
-                wave_avg = np.mean(contractions)
-                wave_details.append(f"wave{wave_id}:{wave_avg:.4f}")
-            else:
-                wave_details.append(f"wave{wave_id}:0.0000")
-        
-        region_stats.append({
-            'region_id': region_id,
-            'region_start': region_start,
-            'region_end': region_end,
-            'avg_wave_contraction_mm': avg_contraction,
-            'num_waves': num_waves,
-            'wave_details': ';'.join(wave_details)
-        })
-    
-    # Export to CSV
-    filename = f'results/{curvature_type}_region_wave_contraction_size.csv'
-    with open(filename, 'w') as f:
-        f.write("region_id,region_start,region_end,avg_wave_contraction_mm,num_waves,wave_details\n")
-        
-        for stat in region_stats:
-            f.write(f"{stat['region_id']},{stat['region_start']},{stat['region_end']},")
-            f.write(f"{stat['avg_wave_contraction_mm']:.4f},{stat['num_waves']},")
-            f.write(f"{stat['wave_details']}\n")
-    
-    print(f"Region wave contraction statistics exported to {filename}")
-
 class MRISegmentationApp:
     def __init__(self, root):
         self.root = root
@@ -1636,6 +1415,7 @@ class MRISegmentationApp:
                     return
             
             cont_sizes = self.contraction_data['contraction_sizes']
+            percentage_occlusion = self.contraction_data['percentage_occlusion']
             
             if curvature_type == "lesser":
                 spacing = self.lesser_spacing.get()
@@ -1651,8 +1431,8 @@ class MRISegmentationApp:
             self.visualize_tracked_waves(cont_sizes, wave_points, region_boundaries, 
                                     intersections, interpolated_points, curvature_type, max_contraction)
             
-            export_wave_data(interpolated_points, region_boundaries, spacing, frame_duration, curvature_type)
-            export_region_wave_contraction_stats(cont_sizes, interpolated_points, region_boundaries, curvature_type)
+            self.export_wave_data(interpolated_points, region_boundaries, spacing, frame_duration, curvature_type)
+            self.export_region_wave_contraction_stats(cont_sizes, percentage_occlusion, interpolated_points, region_boundaries, curvature_type)
             
             messagebox.showinfo("Success", f"{curvature_type.capitalize()} curvature wave tracking completed!")
             
@@ -1894,6 +1674,9 @@ class MRISegmentationApp:
                     speed_mm_s = (p2 - p1) * point_spacing_mm / abs((t2 - t1) * frame_duration_s)
                     wave_speeds.append(speed_mm_s)
             physical_speeds.append(wave_speeds)
+
+        # 计算波对时间差
+        self.calculate_wave_pair_time_differences(wave_interpolated_points, region_boundaries, frame_duration_s, curvature_type)
         
         return all_waves, physical_speeds, region_boundaries, wave_boundary_intersections, wave_interpolated_points
 
@@ -3052,7 +2835,7 @@ class MRISegmentationApp:
                     
                     # 更新关键点位置
                     self.key_points[frame_idx][ktype]['position'] = spline_position.copy()
-                    print(f"同步关键点 {ktype}: {control_point} -> {spline_position}")
+                    #print(f"同步关键点 {ktype}: {control_point} -> {spline_position}")
             
             return True
             
@@ -4000,11 +3783,11 @@ class MRISegmentationApp:
                         all_minor_points.append(key_data['minor']['position'])
             
             if len(all_midpoints) < 3:
-                messagebox.showwarning("Warning", "at least 3 frames to fitting the centerline")
+                messagebox.showwarning("Warning", "至少需要3帧的有效中点才能拟合")
                 return
             
             if len(all_major_points) == 0 or len(all_minor_points) == 0:
-                messagebox.showwarning("Warning", "need keypoints to adjust the endpoints")
+                messagebox.showwarning("Warning", "需要关键点数据来调整中心线端点")
                 return
             
             # 2. 合并所有帧的中点
@@ -4014,8 +3797,8 @@ class MRISegmentationApp:
             avg_major = np.mean(all_major_points, axis=0)
             avg_minor = np.mean(all_minor_points, axis=0)
             
-            print(f"average greater key point: {avg_major}")
-            print(f"average lesser key point: {avg_minor}")
+            print(f"平均大弯点: {avg_major}")
+            print(f"平均小弯点: {avg_minor}")
             
             # 4. 使用所有中点拟合五阶多项式（不考虑关键点约束）
             def polynomial_5th_order(x, a, b, c, d, e, f):
@@ -4064,14 +3847,14 @@ class MRISegmentationApp:
             initial_end_error = np.linalg.norm(initial_centerline[-1] - avg_minor)
             
             messagebox.showinfo("Success", 
-                f"fitting centerline:\n"
-                f"- frame number: {len(all_midpoints)}\n"
-                f"- all midpoints: {len(combined_midpoints)}\n"
-                f"- Endpoint error improvement: {initial_start_error:.2f}->{start_error:.2f}px, "
+                f"中心线拟合并调整完成:\n"
+                f"- 使用帧数: {len(all_midpoints)}\n"
+                f"- 总中点: {len(combined_midpoints)}\n"
+                f"- 端点误差改善: {initial_start_error:.2f}→{start_error:.2f}px, "
                 f"{initial_end_error:.2f}→{end_error:.2f}px")
 
         except Exception as e:
-            messagebox.showerror("Error", f"Failur to fitting the centerline: {str(e)}")
+            messagebox.showerror("Error", f"拟合中心线失败: {str(e)}")
             import traceback
             traceback.print_exc()
 
@@ -4938,6 +4721,591 @@ class MRISegmentationApp:
             import traceback
             traceback.print_exc()
             messagebox.showerror("Error", error_msg)
+
+    def calculate_wave_pair_time_differences(self, wave_interpolated_points, region_boundaries, frame_duration_s, curvature_type="lesser"):
+        """
+        计算相邻波在各个区域内所有点对的时间差，使用已经验证的完全穿过区域的波
+        
+        Args:
+            wave_interpolated_points: 波插值点数据
+            region_boundaries: 区域边界
+            frame_duration_s: 帧持续时间（秒）
+            curvature_type: 曲率类型
+        """
+        try:
+            os.makedirs('results', exist_ok=True)
+            
+            # 使用之前已经验证的完全穿过区域的波
+            valid_wave_regions = {}  # {wave_id: [valid_region_keys]}
+            
+            for wave_id, wave_data in wave_interpolated_points.items():
+                boundary_points = wave_data['boundary_points']
+                if len(boundary_points) < 2:
+                    continue
+                    
+                # Sort boundary points by position
+                sorted_boundary = sorted(boundary_points, key=lambda x: x[1])
+                
+                valid_regions = []
+                for i in range(len(region_boundaries) - 1):
+                    region_start = region_boundaries[i]
+                    region_end = region_boundaries[i + 1]
+                    
+                    # Skip first and last regions
+                    if i == 0 or i == len(region_boundaries) - 2:
+                        continue
+                        
+                    # Check if wave enters and exits this region
+                    has_entry = False
+                    has_exit = False
+                    
+                    for t, p in sorted_boundary:
+                        if not has_entry and region_start <= p < region_end:
+                            has_entry = True
+                        elif has_entry and p >= region_end:
+                            has_exit = True
+                            break
+                            
+                    if has_entry and has_exit:
+                        valid_regions.append((region_start, region_end))
+                        
+                valid_wave_regions[wave_id] = valid_regions
+            
+            # 获取所有有效波ID
+            valid_waves = [wave_id for wave_id, regions in valid_wave_regions.items() if len(regions) > 0]
+            
+            if len(valid_waves) < 2:
+                print("警告：至少需要2个完全穿过区域的波才能计算时间差")
+                return
+            
+            # 准备区域数据
+            region_data = {}
+            for i in range(len(region_boundaries) - 1):
+                region_start = region_boundaries[i]
+                region_end = region_boundaries[i + 1]
+                # 跳过初始和结束区域
+                if i == 0 or i == len(region_boundaries) - 2:
+                    continue
+                region_data[(region_start, region_end)] = {
+                    'region_id': i,
+                    'wave_pairs': []
+                }
+            
+            # 处理相邻波对（只使用有效波）
+            for pair_idx in range(len(valid_waves) - 1):
+                wave1_id = valid_waves[pair_idx]
+                wave2_id = valid_waves[pair_idx + 1]
+                
+                wave1_data = wave_interpolated_points[wave1_id]
+                wave2_data = wave_interpolated_points[wave2_id]
+                
+                # 获取波1和波2都完全穿过的区域
+                wave1_valid_regions = set(valid_wave_regions[wave1_id])
+                wave2_valid_regions = set(valid_wave_regions[wave2_id])
+                common_regions = wave1_valid_regions.intersection(wave2_valid_regions)
+                
+                # 对每个共同区域计算时间差
+                for region_key in common_regions:
+                    region_start, region_end = region_key
+                    
+                    # 获取波1在该区域的点：内部红点 + 边界蓝点
+                    wave1_internal_points = wave1_data['internal_points'].get(region_key, [])
+                    wave1_boundary_points = self._get_boundary_points_for_region(wave1_data['boundary_points'], region_start, region_end)
+                    wave1_all_points = wave1_internal_points + wave1_boundary_points
+                    
+                    # 获取波2在该区域的点
+                    wave2_internal_points = wave2_data['internal_points'].get(region_key, [])
+                    wave2_boundary_points = self._get_boundary_points_for_region(wave2_data['boundary_points'], region_start, region_end)
+                    wave2_all_points = wave2_internal_points + wave2_boundary_points
+                    
+                    if not wave1_all_points or not wave2_all_points:
+                        continue
+                    
+                    # 检查点的数量
+                    expected_internal_points = 9  # 9个内部红点
+                    expected_boundary_points = 2  # 2个边界蓝点
+                    expected_total_points = expected_internal_points + expected_boundary_points
+                    
+                    if len(wave1_internal_points) != expected_internal_points:
+                        print(f"警告：波{wave1_id}在区域{region_key}有{len(wave1_internal_points)}个内部点，期望{expected_internal_points}个")
+                    if len(wave1_boundary_points) != expected_boundary_points:
+                        print(f"警告：波{wave1_id}在区域{region_key}有{len(wave1_boundary_points)}个边界点，期望{expected_boundary_points}个")
+                    
+                    if len(wave2_internal_points) != expected_internal_points:
+                        print(f"警告：波{wave2_id}在区域{region_key}有{len(wave2_internal_points)}个内部点，期望{expected_internal_points}个")
+                    if len(wave2_boundary_points) != expected_boundary_points:
+                        print(f"警告：波{wave2_id}在区域{region_key}有{len(wave2_boundary_points)}个边界点，期望{expected_boundary_points}个")
+                    
+                    # 使用所有点进行配对
+                    time_differences = []
+                    point_pairs = []
+                    point_types = []  # 记录点类型：'internal' 或 'boundary'
+                    
+                    # 按位置精确匹配点对
+                    for wave1_point in wave1_all_points:
+                        t1, p1 = wave1_point
+                        
+                        # 确定这个点的类型
+                        point_type = 'boundary' if wave1_point in wave1_boundary_points else 'internal'
+                        
+                        # 在波2中找最接近位置的点
+                        closest_point = None
+                        min_position_diff = float('inf')
+                        
+                        for wave2_point in wave2_all_points:
+                            t2, p2 = wave2_point
+                            position_diff = abs(p1 - p2)
+                            if position_diff < min_position_diff:
+                                min_position_diff = position_diff
+                                closest_point = (t2, p2)
+                        
+                        # 如果找到足够接近的点
+                        position_tolerance = 1.0  # 严格的位置容差
+                        if closest_point and min_position_diff <= position_tolerance:
+                            t2, p2 = closest_point
+                            time_diff = (t2 - t1) * frame_duration_s
+                            if time_diff > 0:  # 只考虑正的时间差
+                                time_differences.append(time_diff)
+                                point_pairs.append({
+                                    'wave1_point': (t1, p1),
+                                    'wave2_point': (t2, p2),
+                                    'position': p1,
+                                    'position_diff': min_position_diff,
+                                    'point_type': point_type  # 标记点类型
+                                })
+                    
+                    # 检查配对结果
+                    if len(time_differences) != expected_total_points:
+                        print(f"警告：波对{wave1_id}-{wave2_id}在区域{region_key}只成功配对{len(time_differences)}/{expected_total_points}个点")
+                    
+                    # 统计边界点和内部点的数量
+                    boundary_pairs = [p for p in point_pairs if p['point_type'] == 'boundary']
+                    internal_pairs = [p for p in point_pairs if p['point_type'] == 'internal']
+                    
+                    if time_differences:
+                        region_data[region_key]['wave_pairs'].append({
+                            'wave_pair': (wave1_id, wave2_id),
+                            'time_differences': time_differences,
+                            'point_pairs': point_pairs,
+                            'avg_time_diff': np.mean(time_differences),
+                            'std_time_diff': np.std(time_differences),
+                            'min_time_diff': np.min(time_differences),
+                            'max_time_diff': np.max(time_differences),
+                            'num_point_pairs': len(time_differences),
+                            'num_boundary_pairs': len(boundary_pairs),
+                            'num_internal_pairs': len(internal_pairs)
+                        })
+            
+            # 导出到CSV
+            self.export_wave_pair_time_differences_to_csv(region_data, curvature_type, valid_waves)
+            
+            
+        except Exception as e:
+            print(f"计算波对时间差时出错: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    def _get_boundary_points_for_region(self, boundary_points, region_start, region_end):
+        """获取特定区域的边界点"""
+        region_boundary_points = []
+        for t, p in boundary_points:
+            # 边界点正好在区域的边界上
+            if abs(p - region_start) < 0.1 or abs(p - region_end) < 0.1:
+                region_boundary_points.append((t, p))
+        return region_boundary_points
+
+    def export_wave_pair_time_differences_to_csv(self, region_data, curvature_type, valid_waves):
+        """
+        Export detailed wave pair time difference data to CSV, mark boundary points, and calculate means (handling duplicate boundary points)
+        """
+        try:
+            filename = f'results/{curvature_type}_wave_time.csv'
+            
+            with open(filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                
+                # 写入文件头
+                writer.writerow([f"{curvature_type.capitalize()} Curvature - Wave Pair Time Differences Analysis"])
+                writer.writerow(["valid wave number", len(valid_waves)])
+                writer.writerow(["wave ID", ", ".join(map(str, valid_waves))])
+                writer.writerow([])
+                writer.writerow(["RegionID", "RegionStart", "RegionEnd", "WavePair", 
+                            "PointPairIndex", "PointType", "TimeDifference(s)", "Position", 
+                            "PositionDifference", "Wave1_Frame", "Wave1_Position", 
+                            "Wave2_Frame", "Wave2_Position"])
+                
+                # 用于存储所有唯一的时间差（处理重复边界点）
+                all_unique_time_diffs = []
+                boundary_time_diffs = []  # 边界点时间差（用于验证）
+                internal_time_diffs = []  # 内部点时间差
+                
+                # 用于跟踪已经处理过的边界点（避免重复计算）
+                processed_boundary_points = set()
+                
+                total_pairs = 0
+                total_boundary_pairs = 0
+                total_internal_pairs = 0
+                
+                for region_key, data in region_data.items():
+                    region_start, region_end = region_key
+                    region_id = data['region_id']
+                    
+                    for wave_pair_data in data['wave_pairs']:
+                        wave1_id, wave2_id = wave_pair_data['wave_pair']
+                        point_pairs = wave_pair_data['point_pairs']
+                        time_differences = wave_pair_data['time_differences']
+                        
+                        for i, (time_diff, point_pair) in enumerate(zip(time_differences, point_pairs)):
+                            wave1_time, wave1_pos = point_pair['wave1_point']
+                            wave2_time, wave2_pos = point_pair['wave2_point']
+                            avg_position = point_pair['position']
+                            position_diff = point_pair.get('position_diff', 0)
+                            point_type = point_pair.get('point_type', 'unknown')
+                            
+                            # 标记边界点
+                            point_type_display = point_type
+                            if point_type == 'boundary':
+                                point_type_display = 'BOUNDARY'  # 大写标记边界点
+                                
+                                # 创建边界点的唯一标识符（避免重复计算）
+                                boundary_key = (wave1_id, wave2_id, round(avg_position, 1))
+                                
+                                if boundary_key not in processed_boundary_points:
+                                    # 首次遇到这个边界点，添加到唯一列表
+                                    all_unique_time_diffs.append(time_diff)
+                                    boundary_time_diffs.append(time_diff)
+                                    processed_boundary_points.add(boundary_key)
+                                    total_boundary_pairs += 1
+                                # 如果已经处理过，跳过添加到唯一列表（但仍然在CSV中记录）
+                                else:
+                                    # 在CSV中标记为重复边界点
+                                    point_type_display = 'BOUNDARY_DUPLICATE'
+                            else:
+                                point_type_display = 'internal'
+                                all_unique_time_diffs.append(time_diff)
+                                internal_time_diffs.append(time_diff)  
+                                total_internal_pairs += 1
+                            
+                            writer.writerow([
+                                region_id, region_start, region_end,
+                                f"wave{wave1_id}-wave{wave2_id}",
+                                i + 1, point_type_display, f"{time_diff:.3f}", f"{avg_position:.1f}",
+                                f"{position_diff:.2f}",
+                                f"{wave1_time:.3f}", f"{wave1_pos:.1f}",
+                                f"{wave2_time:.3f}", f"{wave2_pos:.1f}"
+                            ])
+                            total_pairs += 1
+                
+                # 计算统计量
+                if all_unique_time_diffs:
+                    mean_time_diff = np.mean(all_unique_time_diffs)
+                    std_time_diff = np.std(all_unique_time_diffs)
+                    min_time_diff = np.min(all_unique_time_diffs)
+                    max_time_diff = np.max(all_unique_time_diffs)
+                else:
+                    mean_time_diff = std_time_diff = min_time_diff = max_time_diff = 0
+                
+                # 添加全局统计
+                writer.writerow(["Global Statistics (Duplicate Boundary Points Processed)"])
+                writer.writerow(["Total Unique Paired Points", "Unique Boundary Points", "Internal Points", "Unique Time Difference Mean(s)", 
+                                "Time Difference Standard Deviation(s)", "Minimum Time Difference(s)", "Maximum Time Difference(s)"])
+                
+                unique_total_pairs = len(all_unique_time_diffs)
+                unique_boundary_pairs = len(boundary_time_diffs)
+                unique_internal_pairs = len(internal_time_diffs)
+                
+                writer.writerow([
+                    unique_total_pairs, unique_boundary_pairs, unique_internal_pairs,
+                    f"{mean_time_diff:.3f}", f"{std_time_diff:.3f}", 
+                    f"{min_time_diff:.3f}", f"{max_time_diff:.3f}"
+                ])
+                
+                
+                # 添加不同类型点的时间差统计
+                if boundary_time_diffs:
+                    boundary_mean = np.mean(boundary_time_diffs)
+                    boundary_std = np.std(boundary_time_diffs)
+                else:
+                    boundary_mean = boundary_std = 0
+                    
+                if internal_time_diffs:
+                    internal_mean = np.mean(internal_time_diffs)
+                    internal_std = np.std(internal_time_diffs)
+                else:
+                    internal_mean = internal_std = 0
+ 
+                writer.writerow([])
+                writer.writerow(["Time Difference Statistics by Point Type"])
+                writer.writerow(["Point Type", "Count", "Mean(s)", "Standard Deviation(s)"])
+                writer.writerow(["Boundary Points", unique_boundary_pairs, f"{boundary_mean:.3f}", f"{boundary_std:.3f}"])
+                writer.writerow(["Internal Points", unique_internal_pairs, f"{internal_mean:.3f}", f"{internal_std:.3f}"])
+                writer.writerow(["All Points", unique_total_pairs, f"{mean_time_diff:.3f}", f"{std_time_diff:.3f}"])
+            
+            print(f"wave period time saved at: {filename}")
+            
+        except Exception as e:
+            print(f"export wave time error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+    # analyse contraction
+    def export_wave_data(self, wave_interpolated_points, region_boundaries, 
+                        point_spacing_mm, frame_duration_s, curvature_type="lesser"):
+        """
+        check if a wave stictly passes through a single region 
+        """
+        os.makedirs('results', exist_ok=True)
+        
+        region_speed_data = {}
+        for i in range(len(region_boundaries) - 1):
+            region_start = region_boundaries[i]
+            region_end = region_boundaries[i + 1]
+            # skip the initial and end region 
+            if i == 0 or i == len(region_boundaries) - 2:
+                continue
+            region_speed_data[(region_start, region_end)] = []
+
+        # process boundary point
+        for wave_id, wave_data in wave_interpolated_points.items():
+            boundary_points = wave_data['boundary_points']
+            if len(boundary_points) < 2:
+                continue  # at least two points can be used to calculate speed
+
+            sorted_boundary_points = sorted(boundary_points, key=lambda x: x[1])
+            
+            # check if a wave passes through a single region
+            for i in range(len(region_boundaries) - 1):
+                region_start = region_boundaries[i]
+                region_end = region_boundaries[i + 1]
+                
+                if i == 0 or i == len(region_boundaries) - 2:
+                    continue
+                    
+                entry_point = None
+                exit_point = None
+                
+                for t, p in sorted_boundary_points:
+                    if p >= region_start and p < region_end and entry_point is None:
+                        entry_point = (t, p)
+                    elif p >= region_end and exit_point is None:
+                        exit_point = (t, p)
+                        break
+                
+                # 只有当有进入和离开点时才计算速度
+                if entry_point and exit_point:
+                    t1, p1 = entry_point
+                    t2, p2 = exit_point
+                    
+                    # calculate velocity (mm/s)
+                    distance_mm = abs(p2 - p1) * point_spacing_mm
+                    time_s = abs(t2 - t1) * frame_duration_s
+                    speed = distance_mm / time_s if time_s > 0 else 0
+                    
+                    region_speed_data[(region_start, region_end)].append({
+                        'wave_id': wave_id,
+                        'speed': speed,
+                        'time_start': t1 * frame_duration_s,
+                        'time_end': t2 * frame_duration_s
+                    })
+
+        # export CSV
+        with open(f'results/{curvature_type}_region_speeds.csv', 'w') as f:
+            f.write("region_id,region_start,region_end,avg_speed_mm_s,num_waves,wave_details\n")
+            for region_id, ((start, end), speeds) in enumerate(region_speed_data.items(), 1):
+                if speeds:
+                    avg_speed = np.mean([s['speed'] for s in speeds])
+                    wave_details = ";".join([
+                        f"wave{s['wave_id']}:{s['speed']:.2f}:{s['time_start']:.2f}-{s['time_end']:.2f}"
+                        for s in speeds
+                    ])
+                    num_waves = len(speeds)
+                else:
+                    avg_speed = 0
+                    wave_details = ""
+                    num_waves = 0
+                
+                f.write(f"{region_id},{start},{end},{avg_speed:.2f},{num_waves},{wave_details}\n")
+
+    def calculate_wave_contraction_stats(self, contraction_sizes, percentage_occlusion, wave_interpolated_points, region_boundaries):
+        """
+        calculate the contraction size of wave that through the region
+        """
+        # Initialize region data storage
+        region_wave_data = {}
+        
+        # First identify which waves fully cross which regions
+        valid_wave_regions = {}  # {wave_id: [valid_region_keys]}
+        
+        for wave_id, wave_data in wave_interpolated_points.items():
+            boundary_points = wave_data['boundary_points']
+            if len(boundary_points) < 2:
+                continue
+                
+            # Sort boundary points by position
+            sorted_boundary = sorted(boundary_points, key=lambda x: x[1])
+            
+            valid_regions = []
+            for i in range(len(region_boundaries) - 1):
+                region_start = region_boundaries[i]
+                region_end = region_boundaries[i + 1]
+                
+                # Skip first and last regions
+                if i == 0 or i == len(region_boundaries) - 2:
+                    continue
+                    
+                # Check if wave enters and exits this region
+                has_entry = False
+                has_exit = False
+                
+                for t, p in sorted_boundary:
+                    if not has_entry and region_start <= p < region_end:
+                        has_entry = True
+                    elif has_entry and p >= region_end:
+                        has_exit = True
+                        break
+                        
+                if has_entry and has_exit:
+                    valid_regions.append((region_start, region_end))
+                    
+            valid_wave_regions[wave_id] = valid_regions
+        
+        # Now calculate contraction stats only for valid wave-region pairs
+        for wave_id, wave_data in wave_interpolated_points.items():
+            if wave_id not in valid_wave_regions:
+                continue
+                
+            valid_regions = valid_wave_regions[wave_id]
+            internal_points = wave_data['internal_points']
+            
+            for region_key in valid_regions:
+                region_start, region_end = region_key
+                
+                # Initialize this region if needed
+                if region_key not in region_wave_data:
+                    region_wave_data[region_key] = {
+                        'wave_contractions': {},
+                        'wave_occlusions': {}
+                    }
+                
+                # Initialize this wave if needed
+                if wave_id not in region_wave_data[region_key]['wave_contractions']:
+                    region_wave_data[region_key]['wave_contractions'][wave_id] = []
+                if wave_id not in region_wave_data[region_key]['wave_occlusions']:
+                    region_wave_data[region_key]['wave_occlusions'][wave_id] = []
+                
+                # 处理该区域的蓝点（边界点）
+                region_boundary_points = self._get_boundary_points_for_region(wave_data['boundary_points'], region_start, region_end)
+                for time, pos in region_boundary_points:
+                    # 直接转换为 Python 原生类型
+                    frame = int(round(float(time)))
+                    pos_rounded = int(round(float(pos)))
+                    
+                    if (0 <= frame < contraction_sizes.shape[0] and 
+                        0 <= pos_rounded < contraction_sizes.shape[1]):
+                        region_wave_data[region_key]['wave_contractions'][wave_id].append(
+                            contraction_sizes[frame, pos_rounded])
+                        region_wave_data[region_key]['wave_occlusions'][wave_id].append(
+                            percentage_occlusion[frame, pos_rounded]
+                        )
+
+                # Add contraction values for points in this region
+                if region_key in internal_points:
+                    for time, pos in internal_points[region_key]:
+                        # 直接转换为 Python 原生类型
+                        frame = int(round(float(time)))
+                        pos_rounded = int(round(float(pos)))
+                        
+                        if (0 <= frame < contraction_sizes.shape[0] and 
+                            0 <= pos_rounded < contraction_sizes.shape[1]):
+                            region_wave_data[region_key]['wave_contractions'][wave_id].append(
+                                contraction_sizes[frame, pos_rounded])
+                            region_wave_data[region_key]['wave_occlusions'][wave_id].append(
+                                percentage_occlusion[frame, pos_rounded]
+                            )
+        
+        return region_wave_data
+
+    def export_region_wave_contraction_stats(self, contraction_sizes,percentage_occlusion, wave_interpolated_points, 
+                                        region_boundaries, curvature_type="lesser"):
+        """
+        Export wave contraction statistics for each region using pre-calculated points.
+        
+        Args:
+            contraction_sizes: Contraction size matrix
+            wave_interpolated_points: Dictionary with pre-calculated points
+            region_boundaries: Array of region boundary positions
+            curvature_type: "lesser" or "greater"
+        """
+        os.makedirs('results', exist_ok=True)
+
+        if percentage_occlusion is None:
+            raise ValueError("percentage_occlusion cannot be None")
+        
+        if contraction_sizes.shape != percentage_occlusion.shape:
+            raise ValueError(f"Contraction sizes shape {contraction_sizes.shape} doesn't match occlusion shape {percentage_occlusion.shape}")
+        
+        # Calculate wave contraction statistics using pre-calculated points
+        region_wave_data = self.calculate_wave_contraction_stats(
+            contraction_sizes=contraction_sizes, 
+            percentage_occlusion=percentage_occlusion,
+            wave_interpolated_points=wave_interpolated_points,
+            region_boundaries=region_boundaries
+        )
+        
+        # Prepare data for export
+        region_stats = []
+        for region_id, (region_key, data) in enumerate(sorted(region_wave_data.items()), 1):
+            region_start, region_end = region_key
+            wave_contractions = data['wave_contractions']
+            wave_occlusions = data['wave_occlusions'] 
+            num_waves = len(wave_contractions)
+            
+            # Calculate overall average contraction across all waves
+            all_contractions = []
+            all_occlusions = []
+            for wave_id, contractions in wave_contractions.items():
+                all_contractions.extend(contractions)
+                all_occlusions.extend(wave_occlusions[wave_id])
+            
+            if all_contractions:
+                avg_contraction = np.mean(all_contractions)
+            else:
+                avg_contraction = 0
+            avg_occlusion = np.mean(all_occlusions) if all_occlusions else 0
+            
+            # Create wave details string with wave ID and its average contraction
+            wave_details = []
+            for wave_id, contractions in sorted(wave_contractions.items()):
+                if contractions:
+                    wave_avg_contraction = np.mean(contractions)
+                    wave_avg_occlusion = np.mean(wave_occlusions[wave_id])  # 总是存在
+                    
+                    wave_details.append(f"wave{wave_id}:size={wave_avg_contraction:.4f} ; occlusion={wave_avg_occlusion:.2f}%")
+                else:
+                    wave_details.append(f"wave{wave_id}:size=0.0000,occlusion=0.00%")
+            
+            region_stats.append({
+                'region_id': region_id,
+                'region_start': region_start,
+                'region_end': region_end,
+                'avg_wave_contraction_mm': avg_contraction,
+                'avg_wave_occlusion_percent': avg_occlusion,
+                'num_waves': num_waves,
+                'wave_details': ','.join(wave_details)
+            })
+        
+        # Export to CSV
+        filename = f'results/{curvature_type}_region_wave_contraction_size.csv'
+        with open(filename, 'w') as f:
+            f.write("region_id,region_start,region_end,avg_wave_contraction_mm,avg_wave_occlusion_percent,num_waves,wave_details\n")
+            
+            for stat in region_stats:
+                f.write(f"{stat['region_id']},{stat['region_start']},{stat['region_end']},")
+                f.write(f"{stat['avg_wave_contraction_mm']:.4f},{stat['avg_wave_occlusion_percent']:.2f},")
+                f.write(f"{stat['num_waves']},{stat['wave_details']}\n")
+        
+        print(f"Region wave contraction statistics exported to {filename}")
+
 
 # Main application loop
 if __name__ == "__main__":
