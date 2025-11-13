@@ -15,7 +15,8 @@ from scipy.optimize import curve_fit
 import hashlib
 from scipy import interpolate
 import csv  
-
+import datetime
+    
 # Constants
 N_REGIONS = 20  # number of regions for contraction analysis
 OUTPUT_DPI = 600  # resolution for saved figures
@@ -1391,68 +1392,126 @@ class MRISegmentationApp:
             import traceback
             traceback.print_exc()
 
-    def _track_waves_for_curvature(self, curvature_type):
+    def save_wave_tracking_points(self, wave_points, region_boundaries, curvature_type):
+        """保存手动波追踪的点位置"""
         try:
-            if (not hasattr(self, 'contraction_data') or 
-                self.contraction_data is None or 
-                self.contraction_data.get('curvature_type') != curvature_type):
-                
-                result = messagebox.askyesno(
-                    "Analysis Required", 
-                    f"{curvature_type.capitalize()} curvature analysis is required for wave tracking.\n"
-                    f"Do you want to run {curvature_type} curvature analysis now?"
-                )
-                
-                if result:
-                    self.analyze_contraction(curvature_type)
-                    if (hasattr(self, 'contraction_data') and 
-                        self.contraction_data is not None and 
-                        self.contraction_data.get('curvature_type') == curvature_type):
-                        pass
-                    else:
-                        return
-                else:
-                    return
+            if not wave_points:
+                messagebox.showwarning("Warning", "没有波追踪点可保存")
+                return
             
-            cont_sizes = self.contraction_data['contraction_sizes']
-            percentage_occlusion = self.contraction_data['percentage_occlusion']
+            save_path = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+                title="保存波追踪点"
+            )
             
-            if curvature_type == "lesser":
-                spacing = self.lesser_spacing.get()
-            else:
-                spacing = self.greater_spacing.get()
+            if not save_path:
+                return
             
-            frame_duration = self.frame_duration.get()
-            max_contraction = self.max_contraction.get()
+            # 准备保存的数据结构
+            wave_data = {
+                "curvature_type": curvature_type,
+                "region_boundaries": region_boundaries.tolist() if hasattr(region_boundaries, 'tolist') else region_boundaries,
+                "wave_points": [],
+                "timestamp": datetime.datetime.now().isoformat(),
+                "image_folder_hash": hashlib.md5(self.image_folder.encode()).hexdigest() if self.image_folder else None
+            }
             
-            wave_points, physical_speeds, region_boundaries, intersections, interpolated_points = self.manually_track_waves(
-                cont_sizes, spacing, frame_duration, N_REGIONS, curvature_type, max_contraction)
+            # 转换波点数据为可序列化格式
+            for wave in wave_points:
+                serialized_wave = []
+                for point in wave:
+                    frame, position = point
+                    serialized_wave.append([float(frame), float(position)])
+                wave_data["wave_points"].append(serialized_wave)
             
-            self.visualize_tracked_waves(cont_sizes, wave_points, region_boundaries, 
-                                    intersections, interpolated_points, curvature_type, max_contraction)
+            # 保存到文件
+            with open(save_path, 'w', encoding='utf-8') as f:
+                json.dump(wave_data, f, indent=2, ensure_ascii=False)
             
-            self.export_wave_data(interpolated_points, region_boundaries, spacing, frame_duration, curvature_type)
-            self.export_region_wave_contraction_stats(cont_sizes, percentage_occlusion, interpolated_points, region_boundaries, curvature_type)
+            messagebox.showinfo("Success", f"波追踪点已保存到:\n{save_path}")
+            self.status_var.set(f"波追踪点已保存 - {os.path.basename(save_path)}")
             
-            messagebox.showinfo("Success", f"{curvature_type.capitalize()} curvature wave tracking completed!")
+            return save_path
             
         except Exception as e:
-            messagebox.showerror("Error", f"{curvature_type.capitalize()} curvature wave tracking failed: {str(e)}")
+            messagebox.showerror("Error", f"保存波追踪点失败: {str(e)}")
             import traceback
             traceback.print_exc()
 
-    def manually_track_waves(self, contraction_sizes, point_spacing_mm, frame_duration_s, n_regions, curvature_type="lesser", max_contraction=10):
+    def load_wave_tracking_points(self):
+        """加载手动波追踪的点位置"""
+        try:
+            load_path = filedialog.askopenfilename(
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+                title="加载波追踪点"
+            )
+            
+            if not load_path:
+                return None, None, None
+            
+            with open(load_path, 'r', encoding='utf-8') as f:
+                wave_data = json.load(f)
+            
+            # 验证数据完整性
+            required_fields = ["curvature_type", "region_boundaries", "wave_points"]
+            for field in required_fields:
+                if field not in wave_data:
+                    raise ValueError(f"缺少必要字段: {field}")
+            
+            # 验证图像文件夹（可选）
+            if (wave_data.get("image_folder_hash") and 
+                self.image_folder and 
+                hashlib.md5(self.image_folder.encode()).hexdigest() != wave_data["image_folder_hash"]):
+                
+                result = messagebox.askyesno(
+                    "警告", 
+                    "波追踪点数据来自不同的图像文件夹。是否继续加载？"
+                )
+                if not result:
+                    return None, None, None
+            
+            # 转换数据格式
+            curvature_type = wave_data["curvature_type"]
+            region_boundaries = np.array(wave_data["region_boundaries"])
+            
+            wave_points = []
+            for serialized_wave in wave_data["wave_points"]:
+                wave = []
+                for point in serialized_wave:
+                    frame, position = point
+                    wave.append((frame, position))
+                wave_points.append(wave)
+            
+            messagebox.showinfo("Success", 
+                f"波追踪点加载成功:\n"
+                f"- 曲率类型: {curvature_type}\n"
+                f"- 波数量: {len(wave_points)}\n"
+                f"- 区域数量: {len(region_boundaries)-1}"
+            )
+            
+            self.status_var.set(f"波追踪点已加载 - {len(wave_points)}个波")
+            
+            return wave_points, region_boundaries, curvature_type
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"加载波追踪点失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None, None, None
+
+    def manually_track_waves_with_save_load(self, contraction_sizes, point_spacing_mm, frame_duration_s, n_regions, curvature_type="lesser", max_contraction=10):
         """
-        Interactive function to manually select wave points and calculate speeds.
+        增强的手动波追踪功能，包含保存/加载功能
         """
         n_frames, n_points = contraction_sizes.shape
         
-        # Create regions
+        # 创建区域
         region_boundaries = np.linspace(0, n_points, n_regions+1, dtype=int)
         
         tracking_window = tk.Toplevel(self.root)
         tracking_window.title(f"{curvature_type.capitalize()} Curvature Wave Tracking")
-        tracking_window.geometry("1200x700")
+        tracking_window.geometry("1200x1000")
 
         tracking_window.transient(self.root)
         tracking_window.grab_set()
@@ -1474,15 +1533,15 @@ class MRISegmentationApp:
         cbar.set_label('Contraction Size (mm)', fontsize=16)
         cbar.ax.tick_params(labelsize=14)
         
-        # Plot region boundaries
+        # 绘制区域边界
         for boundary in region_boundaries:
             ax.axvline(x=boundary, color='blue', linestyle='-', alpha=0.5)
         
-        # Highlight excluded regions
+        # 高亮排除区域
         ax.axvspan(region_boundaries[0], region_boundaries[1], color='red', alpha=0.2)
         ax.axvspan(region_boundaries[-2], region_boundaries[-1], color='red', alpha=0.2)
         
-        # Add labels
+        # 添加标签
         ax.set_xticks(np.arange(0, n_points, 20))
         ax.tick_params(axis='x', labelsize=16)
         ax.tick_params(axis='y', labelsize=16)
@@ -1496,7 +1555,7 @@ class MRISegmentationApp:
         plt.tight_layout()
         canvas.draw()
         
-        # Tracking variables
+        # 追踪变量
         all_waves = []
         current_wave = []
         wave_line = None
@@ -1509,6 +1568,64 @@ class MRISegmentationApp:
         info_var.set('Click to add points. "Z": undo last point. "N": new wave. "F": finish.')
         info_label = tk.Label(button_frame, textvariable=info_var, font=("Arial", 12))
         info_label.pack(pady=5)
+        
+        # 添加保存/加载按钮
+        save_load_frame = tk.Frame(button_frame)
+        save_load_frame.pack(pady=5)
+        
+        def save_current_points():
+            """保存当前波追踪点"""
+            if all_waves or current_wave:
+                waves_to_save = all_waves.copy()
+                if current_wave:
+                    waves_to_save.append(current_wave.copy())
+                
+                save_path = self.save_wave_tracking_points(waves_to_save, region_boundaries, curvature_type)
+                if save_path:
+                    # 在图中标记已保存
+                    ax.set_title(f'{curvature_type.capitalize()} Curvature - Points Saved to {os.path.basename(save_path)}', 
+                            fontsize=14, color='green')
+                    canvas.draw()
+        
+        def load_saved_points():
+            """加载保存的波追踪点"""
+            nonlocal all_waves, current_wave
+            
+            loaded_data = self.load_wave_tracking_points()
+            if loaded_data[0] is not None:
+                loaded_waves, loaded_boundaries, loaded_curvature = loaded_data
+                
+                # 验证曲率类型匹配
+                if loaded_curvature != curvature_type:
+                    messagebox.showwarning("Warning", 
+                        f"加载的波追踪点曲率类型不匹配: 当前{curvature_type}, 加载{loaded_curvature}")
+                    return
+                
+                # 验证区域边界匹配（允许小的差异）
+                if len(loaded_boundaries) != len(region_boundaries):
+                    messagebox.showwarning("Warning", 
+                        f"区域边界数量不匹配: 当前{len(region_boundaries)}, 加载{len(loaded_boundaries)}")
+                    return
+                
+                # 更新波数据
+                all_waves = loaded_waves
+                current_wave = []
+                
+                # 更新显示
+                update_wave_plot()
+                
+                # 更新标题
+                ax.set_title(f'{curvature_type.capitalize()} Curvature - Loaded {len(all_waves)} Waves', 
+                        fontsize=14, color='blue')
+                canvas.draw()
+                
+                info_var.set(f'Loaded {len(all_waves)} waves. Click to add more points.')
+        
+        save_button = tk.Button(save_load_frame, text="Save Points", command=save_current_points)
+        load_button = tk.Button(save_load_frame, text="Load Points", command=load_saved_points)
+        
+        save_button.pack(side=tk.LEFT, padx=5)
+        load_button.pack(side=tk.LEFT, padx=5)
         
         def new_wave():
             nonlocal current_wave
@@ -1545,36 +1662,54 @@ class MRISegmentationApp:
         finish_button.pack(side=tk.LEFT, padx=5)
 
         def update_wave_plot():
-            """Update the plot with current wave points"""
+            """更新波点显示"""
             nonlocal wave_line, wave_scatter
             
-            # Clear previous artists
+            # 清除之前的艺术家
             for artist in [wave_line, wave_scatter]:
                 if artist is not None and artist in ax.get_children():
                     artist.remove()
             
+            # 绘制所有已完成的波
+            for i, wave in enumerate(all_waves):
+                if not wave:
+                    continue
+                    
+                t_coords = [t for t, _ in wave]
+                p_coords = [p for _, p in wave]
+                
+                # 创建散点图
+                scatter = ax.scatter(p_coords, t_coords, color='red', 
+                                s=25, marker='o', zorder=3, alpha=0.7)
+                
+                # 创建连线
+                if len(wave) > 1:
+                    sorted_wave = sorted(wave, key=lambda x: x[1])
+                    p_coords = [p for _, p in sorted_wave]
+                    t_coords = [t for t, _ in sorted_wave]
+                    line = ax.plot(p_coords, t_coords, 'r-', 
+                                linewidth=1.5, zorder=2, alpha=0.7)[0]
+            
+            # 绘制当前波
             if current_wave:
-                # Extract coordinates
-                p_coords = [p for _, p in current_wave]
                 t_coords = [t for t, _ in current_wave]
+                p_coords = [p for _, p in current_wave]
                 
-                # Create new scatter plot
                 wave_scatter = ax.scatter(p_coords, t_coords, color='red', 
-                                        s=25, marker='o', zorder=3)
+                                        s=25, marker='o', zorder=4)
                 
-                # Create line if enough points
                 if len(current_wave) > 1:
                     sorted_wave = sorted(current_wave, key=lambda x: x[1])
                     p_coords = [p for _, p in sorted_wave]
                     t_coords = [t for t, _ in sorted_wave]
                     wave_line = ax.plot(p_coords, t_coords, 'r-', 
-                                    linewidth=1.5, zorder=2)[0]
+                                    linewidth=2, zorder=3)[0]
             
             canvas.draw()
-            info_var.set(f'Current wave: {len(current_wave)} points. "Z": undo last point. "N": new wave. "F": finish.')
+            info_var.set(f'Current wave: {len(current_wave)} points. Total waves: {len(all_waves)}. "Z": undo last point. "N": new wave. "F": finish.')
 
         def on_click(event):
-            """Handle click events"""
+            """处理点击事件"""
             if event.inaxes != ax:
                 return
             
@@ -1582,20 +1717,28 @@ class MRISegmentationApp:
             update_wave_plot()
 
         def on_key(event):
-            """Handle key press events"""
+            """处理按键事件"""
             if event.key == 'n' or event.key == 'N':  # New wave
                 new_wave()
             elif event.key == 'f' or event.key == 'F':  # Finish
                 finish_tracking()
             elif event.key == 'z' or event.key == 'Z':  # Undo last point
                 undo_last()
+            elif event.key == 's' or event.key == 'S':  # Save points
+                save_current_points()
+            elif event.key == 'l' or event.key == 'L':  # Load points
+                load_saved_points()
         
-        # Connect event handlers
+        # 连接事件处理器
         fig.canvas.mpl_connect('button_press_event', on_click)
         fig.canvas.mpl_connect('key_press_event', on_key)
         
+        # 更新信息提示
+        info_var.set('Click to add points. "Z": undo, "N": new wave, "F": finish, "S": save, "L": load')
+        
         tracking_window.wait_window()
         
+        # 后续处理（计算插值点等）与原始函数相同
         wave_boundary_intersections = []
         wave_interpolated_points = {}
         
@@ -1663,7 +1806,7 @@ class MRISegmentationApp:
                 print(f"Linear interpolation failed: {e}")
                 wave_boundary_intersections.append([])
         
-        # Calculate physical speeds
+        # 计算物理速度
         physical_speeds = []
         for intersections in wave_boundary_intersections:
             wave_speeds = []
@@ -1680,6 +1823,56 @@ class MRISegmentationApp:
         
         return all_waves, physical_speeds, region_boundaries, wave_boundary_intersections, wave_interpolated_points
 
+    def _track_waves_for_curvature(self, curvature_type):
+        try:
+            if (not hasattr(self, 'contraction_data') or 
+                self.contraction_data is None or 
+                self.contraction_data.get('curvature_type') != curvature_type):
+                
+                result = messagebox.askyesno(
+                    "Analysis Required", 
+                    f"{curvature_type.capitalize()} curvature analysis is required for wave tracking.\n"
+                    f"Do you want to run {curvature_type} curvature analysis now?"
+                )
+                
+                if result:
+                    self.analyze_contraction(curvature_type)
+                    if (hasattr(self, 'contraction_data') and 
+                        self.contraction_data is not None and 
+                        self.contraction_data.get('curvature_type') == curvature_type):
+                        pass
+                    else:
+                        return
+                else:
+                    return
+            
+            cont_sizes = self.contraction_data['contraction_sizes']
+            percentage_occlusion = self.contraction_data['percentage_occlusion']
+            
+            if curvature_type == "lesser":
+                spacing = self.lesser_spacing.get()
+            else:
+                spacing = self.greater_spacing.get()
+            
+            frame_duration = self.frame_duration.get()
+            max_contraction = self.max_contraction.get()
+            
+            # 使用新的包含保存/加载功能的波追踪函数
+            wave_points, physical_speeds, region_boundaries, intersections, interpolated_points = self.manually_track_waves_with_save_load(
+                cont_sizes, spacing, frame_duration, N_REGIONS, curvature_type, max_contraction)
+            
+            self.visualize_tracked_waves(cont_sizes, wave_points, region_boundaries, 
+                                    intersections, interpolated_points, curvature_type, max_contraction)
+            
+            self.export_wave_data(interpolated_points, region_boundaries, spacing, frame_duration, curvature_type)
+            self.export_region_wave_contraction_stats(cont_sizes, percentage_occlusion, interpolated_points, region_boundaries, curvature_type)
+            
+            messagebox.showinfo("Success", f"{curvature_type.capitalize()} curvature wave tracking completed!")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"{curvature_type.capitalize()} curvature wave tracking failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
 
     def create_widgets(self):
         # Main frame
@@ -1812,24 +2005,6 @@ class MRISegmentationApp:
         self.propagate_button = tk.Button(Propagate_buttons_frame, text="Propagate to Next Frame",command=self.propagate_roi_with_flow)
         self.propagate_button.pack(fill=tk.X, pady=2)
 
-        # 在ROI控制部分添加新按钮
-        advanced_roi_frame = tk.LabelFrame(control_panel, text="Advanced ROI")
-        advanced_roi_frame.pack(fill=tk.X, pady=5)
-
-        auto_detect_frame = tk.Frame(advanced_roi_frame)
-        auto_detect_frame.pack(fill=tk.X)
-
-        smoothing_frame = tk.Frame(advanced_roi_frame)
-        smoothing_frame.pack(fill=tk.X)
-
-        self.temporal_smooth_btn = tk.Button(smoothing_frame, text="Temporal Smoothing", 
-                                            command=self.temporal_smoothing)
-        self.temporal_smooth_btn.pack(fill=tk.X, pady=2)
-
-        self.motion_optimize_btn = tk.Button(smoothing_frame, text="Optimize Motion", 
-                                    command=self.optimize_motion_consistency)
-        self.motion_optimize_btn.pack(fill=tk.X, pady=2)
-
 
         # 在 Centerline 框架中添加均匀采样按钮
         uniform_frame = tk.LabelFrame(roi_frame, text="Uniform Sampling")
@@ -1872,6 +2047,9 @@ class MRISegmentationApp:
 
         self.toggle_split_button = tk.Button(centerline_frame, text="Hide Split Points", command=self.toggle_split_points,state=tk.DISABLED)
         self.toggle_split_button.pack(fill=tk.X, pady=2)
+
+        self.curvature_smooth_btn = tk.Button(centerline_frame, text="Time Smoothing", command=self.enhanced_temporal_smoothing_with_curvature)
+        self.curvature_smooth_btn.pack(fill=tk.X, pady=2)
 
         Calculate_buttons_frame = tk.Frame(centerline_frame)
         Calculate_buttons_frame.pack(fill=tk.X)  
@@ -4492,235 +4670,597 @@ class MRISegmentationApp:
             self.control_points.pop(index)
             self.update_roi_display()
 
-    def temporal_smoothing(self, window_size=3):
-        """对控制点和关键点进行时间序列光顺"""
-        if len(self.roi_points) < window_size:
-            messagebox.showwarning("Warning", "帧数太少，无法进行时间平滑")
-            return
+    def update_keypoint_indices(self, frame_idx, major_keypoint, minor_keypoint):
+        """更新关键点索引"""
+        if frame_idx not in self.key_points:
+            self.key_points[frame_idx] = {}
         
+        # 找到关键点在控制点列表中的索引
+        control_points_array = np.array(self.control_points)
+        
+        # 找到大弯关键点索引
+        major_distances = np.linalg.norm(control_points_array - major_keypoint, axis=1)
+        major_idx = np.argmin(major_distances)
+        
+        # 找到小弯关键点索引
+        minor_distances = np.linalg.norm(control_points_array - minor_keypoint, axis=1)
+        minor_idx = np.argmin(minor_distances)
+        
+        # 更新关键点数据
+        self.key_points[frame_idx]['major'] = {
+            'index': int(major_idx),
+            'position': self.control_points[major_idx]
+        }
+        self.key_points[frame_idx]['minor'] = {
+            'index': int(minor_idx),
+            'position': self.control_points[minor_idx]
+        }
+        
+        print(f"关键点索引更新 - 大弯: {major_idx}, 小弯: {minor_idx}")
+
+    def plot_curvature_distribution(self, original_curve, original_curvatures, sampled_points, sampled_curvatures,
+                                high_threshold, low_threshold):
+        """
+        绘制曲率分布图，用于调试
+        """
         try:
-            # 对控制点进行时间平滑
-            sorted_frames = sorted(self.roi_points.keys())
-            smoothed_roi_points = {}
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
             
-            for i, frame_idx in enumerate(sorted_frames):
-                # 获取时间窗口内的帧
-                start_idx = max(0, i - window_size // 2)
-                end_idx = min(len(sorted_frames), i + window_size // 2 + 1)
-                window_frames = sorted_frames[start_idx:end_idx]
-                
-                # 对每个控制点进行时间平均
-                n_points = len(self.roi_points[frame_idx])
-                smoothed_points = np.zeros((n_points, 2))
-                
-                for point_idx in range(n_points):
-                    point_values = []
-                    for win_frame in window_frames:
-                        if win_frame in self.roi_points and point_idx < len(self.roi_points[win_frame]):
-                            point_values.append(self.roi_points[win_frame][point_idx])
-                    
-                    if point_values:
-                        smoothed_points[point_idx] = np.mean(point_values, axis=0)
-                
-                smoothed_roi_points[frame_idx] = smoothed_points
+            # 绘制原始曲线的曲率
+            if len(original_curvatures) > 0:
+                ax1.plot(range(len(original_curvatures)), original_curvatures, 'b-', alpha=0.7, label='Original Curvature')
+                ax1.axhline(y=high_threshold, color='r', linestyle='--', alpha=0.5, label='High Curvature Threshold')
+                ax1.axhline(y=low_threshold, color='g', linestyle='--', alpha=0.5, label='Low Curvature Threshold')
+                ax1.set_title('Original Curve Curvature Distribution')
+                ax1.set_xlabel('Point Index')
+                ax1.set_ylabel('Curvature')
+                ax1.legend()
+                ax1.grid(True, alpha=0.3)
             
-            # 更新ROI点
-            self.roi_points = smoothed_roi_points
+            # 绘制采样点的曲率
+            if len(sampled_curvatures) > 0:
+                ax2.plot(range(len(sampled_curvatures)), sampled_curvatures, 'r-', alpha=0.7, label='Sampled Curvature')
+                ax2.set_title('Sampled Points Curvature Distribution')
+                ax2.set_xlabel('Point Index')
+                ax2.set_ylabel('Curvature')
+                ax2.legend()
+                ax2.grid(True, alpha=0.3)
             
-            # 对关键点进行时间平滑（如果存在）
-            if self.key_points:
-                smoothed_key_points = {}
-                
-                for i, frame_idx in enumerate(sorted_frames):
-                    if frame_idx not in self.key_points:
-                        continue
-                        
-                    start_idx = max(0, i - window_size // 2)
-                    end_idx = min(len(sorted_frames), i + window_size // 2 + 1)
-                    window_frames = sorted_frames[start_idx:end_idx]
-                    
-                    major_positions = []
-                    minor_positions = []
-                    
-                    for win_frame in window_frames:
-                        if (win_frame in self.key_points and 
-                            'major' in self.key_points[win_frame] and 
-                            'minor' in self.key_points[win_frame]):
-                            major_positions.append(self.key_points[win_frame]['major']['position'])
-                            minor_positions.append(self.key_points[win_frame]['minor']['position'])
-                    
-                    if major_positions and minor_positions:
-                        smoothed_major = np.mean(major_positions, axis=0)
-                        smoothed_minor = np.mean(minor_positions, axis=0)
-                        
-                        # 找到最近的控制点索引
-                        major_idx = self.find_closest_control_point(smoothed_major)
-                        minor_idx = self.find_closest_control_point(smoothed_minor)
-                        
-                        smoothed_key_points[frame_idx] = {
-                            'major': {'index': major_idx, 'position': smoothed_major},
-                            'minor': {'index': minor_idx, 'position': smoothed_minor}
-                        }
-                
-                self.key_points = smoothed_key_points
+            plt.tight_layout()
+            plt.savefig('curvature_sampling_debug.png', dpi=150, bbox_inches='tight')
+            plt.close()
             
-            self.display_current_image()
-            messagebox.showinfo("Success", f"时间平滑完成 (窗口大小: {window_size})")
+            print("    曲率分布图已保存为 'curvature_sampling_debug.png'")
             
         except Exception as e:
-            messagebox.showerror("Error", f"时间平滑失败: {str(e)}")
+            print(f"    绘制曲率分布图失败: {e}")
 
-    def optimize_motion_consistency(self):
-        """使用光流优化运动一致性（带详细调试信息）"""
-        if len(self.image_files) < 3:
-            messagebox.showwarning("Warning", "需要至少3帧图像才能进行运动优化")
+    def sample_curve_by_curvature(self, curve_points, target_num_points, curvature_weight=2.0):
+        """
+        基于曲率大小进行曲线采样 - 修正版本（修复索引越界）
+        """
+        if len(curve_points) <= target_num_points:
+            return curve_points.tolist()
+        
+        # 计算曲率 - 使用更精确的方法
+        curvatures = self.calculate_enhanced_curvature(curve_points)
+        
+        if len(curvatures) == 0 or np.max(curvatures) == 0:
+            # 如果无法计算曲率或曲率为0，回退到均匀采样
+            return self.sample_curve_points(curve_points, target_num_points)
+        
+        print(f"    曲率统计: 最小值={np.min(curvatures):.4f}, 最大值={np.max(curvatures):.4f}, 平均值={np.mean(curvatures):.4f}")
+        print(f"    曲线点数: {len(curve_points)}, 曲率点数: {len(curvatures)}")
+        
+        # 应用曲率权重 - 关键修正
+        if np.max(curvatures) > np.min(curvatures):
+            normalized_curvature = (curvatures - np.min(curvatures)) / (np.max(curvatures) - np.min(curvatures))
+        else:
+            normalized_curvature = np.zeros_like(curvatures)
+        
+        # 创建密度函数：基础密度 + 曲率权重
+        density = 1.0 + curvature_weight * normalized_curvature
+        
+        # 计算累积弧长
+        diffs = np.diff(curve_points, axis=0)
+        if self.has_pixel_spacing and self.pixel_spacing is not None:
+            spacing_x, spacing_y = self.pixel_spacing
+            dx = diffs[:, 0] * spacing_x
+            dy = diffs[:, 1] * spacing_y
+            dists = np.sqrt(dx**2 + dy**2)
+        else:
+            dists = np.linalg.norm(diffs, axis=1)
+        
+        print(f"    距离数组长度: {len(dists)}, 密度数组长度: {len(density)}")
+        
+        # 修复索引越界问题
+        weighted_dists = []
+        for i in range(len(dists)):
+            # 使用相邻点的平均密度 - 修复边界条件
+            if i == 0:
+                # 第一个段：使用第一个点的密度
+                avg_density = density[0]
+            elif i == len(dists) - 1:
+                # 最后一个段：使用最后一个点的密度
+                avg_density = density[-1]
+            else:
+                # 中间段：使用相邻两个点的平均密度
+                avg_density = (density[i] + density[i+1]) / 2
+            
+            weighted_dists.append(dists[i] * avg_density)
+        
+        cum_weighted_dists = np.insert(np.cumsum(weighted_dists), 0, 0)
+        total_weighted_length = cum_weighted_dists[-1]
+        
+        # 在加权空间中均匀采样
+        target_weighted_positions = np.linspace(0, total_weighted_length, target_num_points)
+        sampled_points = []
+        
+        for pos in target_weighted_positions:
+            # 找到对应的段
+            idx = np.searchsorted(cum_weighted_dists, pos) - 1
+            if idx < 0:
+                idx = 0
+            if idx >= len(curve_points) - 1:
+                sampled_points.append(curve_points[-1].tolist())
+                continue
+            
+            # 计算在原始空间中的位置
+            segment_start_weighted = cum_weighted_dists[idx]
+            segment_end_weighted = cum_weighted_dists[idx + 1]
+            segment_weighted_length = segment_end_weighted - segment_start_weighted
+            
+            if segment_weighted_length == 0:
+                t = 0
+            else:
+                t = (pos - segment_start_weighted) / segment_weighted_length
+            
+            # 在原始空间中线性插值
+            interp_point = curve_points[idx] + t * (curve_points[idx + 1] - curve_points[idx])
+            sampled_points.append(interp_point.tolist())
+        
+        # 验证采样效果
+        self.validate_curvature_sampling_effect(sampled_points, curve_points, curvatures, target_num_points, curvature_weight)
+        
+        return sampled_points
+
+    def calculate_enhanced_curvature(self, points):
+        """
+        增强的曲率计算方法 - 修复边界条件
+        """
+        if len(points) < 3:
+            return np.array([])
+        
+        curvatures = []
+        
+        # 处理第一个点（特殊处理）
+        if len(points) >= 2:
+            p0 = points[0]
+            p1 = points[1]
+            v = p1 - p0
+            len_v = np.linalg.norm(v)
+            if len_v > 0:
+                # 对于第一个点，使用较小的曲率值
+                curvatures.append(0.001)
+            else:
+                curvatures.append(0.0)
+        
+        # 处理中间点
+        for i in range(1, len(points) - 1):
+            # 三个连续点
+            p0 = points[i - 1]
+            p1 = points[i]
+            p2 = points[i + 1]
+            
+            # 计算向量
+            v1 = p1 - p0
+            v2 = p2 - p1
+            
+            # 计算向量长度
+            len_v1 = np.linalg.norm(v1)
+            len_v2 = np.linalg.norm(v2)
+            
+            if len_v1 == 0 or len_v2 == 0:
+                curvatures.append(0.0)
+                continue
+            
+            # 计算角度变化（曲率）
+            dot_product = np.dot(v1, v2) / (len_v1 * len_v2)
+            dot_product = np.clip(dot_product, -1.0, 1.0)
+            angle = np.arccos(dot_product)
+            
+            # 使用曲率公式: κ = 2 * sin(θ/2) / 平均长度
+            avg_length = (len_v1 + len_v2) / 2
+            if avg_length > 0:
+                curvature = 2 * np.sin(angle / 2) / avg_length
+            else:
+                curvature = 0
+            
+            curvatures.append(curvature)
+        
+        # 处理最后一个点（特殊处理）
+        if len(points) >= 2:
+            p_prev = points[-2]
+            p_last = points[-1]
+            v = p_last - p_prev
+            len_v = np.linalg.norm(v)
+            if len_v > 0:
+                curvatures.append(0.001)
+            else:
+                curvatures.append(0.0)
+        
+        # 确保曲率数组长度与点数组长度一致
+        if len(curvatures) != len(points):
+            print(f"警告: 曲率数组长度 ({len(curvatures)}) 与点数组长度 ({len(points)}) 不匹配")
+            # 调整长度
+            if len(curvatures) < len(points):
+                # 填充最后一个值
+                while len(curvatures) < len(points):
+                    curvatures.append(curvatures[-1] if curvatures else 0.0)
+            else:
+                # 截断
+                curvatures = curvatures[:len(points)]
+        
+        return np.array(curvatures)
+
+    def sample_curve_points(self, curve_points, num_points):
+        """
+        从曲线点中采样指定数量的控制点 - 修复版本
+        """
+        if len(curve_points) <= num_points:
+            return curve_points.tolist()
+        
+        # 计算累积弧长
+        diffs = np.diff(curve_points, axis=0)
+        if len(diffs) == 0:
+            return [curve_points[0].tolist()] * num_points
+        
+        if self.has_pixel_spacing and self.pixel_spacing is not None:
+            spacing_x, spacing_y = self.pixel_spacing
+            dx = diffs[:, 0] * spacing_x
+            dy = diffs[:, 1] * spacing_y
+            dists = np.sqrt(dx**2 + dy**2)
+        else:
+            dists = np.linalg.norm(diffs, axis=1)
+        
+        # 处理零距离的情况
+        if np.sum(dists) == 0:
+            # 如果所有距离都是0，均匀采样索引
+            indices = np.linspace(0, len(curve_points)-1, num_points).astype(int)
+            return [curve_points[i].tolist() for i in indices]
+        
+        cum_dists = np.insert(np.cumsum(dists), 0, 0)
+        total_length = cum_dists[-1]
+        
+        # 等弧长采样
+        target_positions = np.linspace(0, total_length, num_points)
+        sampled_points = []
+        
+        for pos in target_positions:
+            idx = np.searchsorted(cum_dists, pos) - 1
+            if idx < 0:
+                idx = 0
+            if idx >= len(curve_points)-1:
+                sampled_points.append(curve_points[-1].tolist())
+                continue
+            
+            # 线性插值
+            t = (pos - cum_dists[idx]) / (cum_dists[idx+1] - cum_dists[idx])
+            interp_point = curve_points[idx] + t * (curve_points[idx+1] - curve_points[idx])
+            sampled_points.append(interp_point.tolist())
+        
+        return sampled_points
+
+    def enhanced_temporal_smoothing_with_curvature(self, window_size=3, points_per_curve=30, curvature_weight=2.0):
+        """
+        增强的时间光顺，包含基于曲率的重采样 - 修正版本
+        """
+        if len(self.spline_points_per_frame) < window_size:
+            messagebox.showwarning("Warning", 
+                f"需要至少{window_size}帧数据，当前只有{len(self.spline_points_per_frame)}帧")
             return
         
         try:
-            print("开始运动一致性优化...")
-            
-            # 1. 检查ROI数据
-            roi_frames = sorted([idx for idx in self.roi_points.keys() if len(self.roi_points[idx]) > 0])
-            print(f"找到 {len(roi_frames)} 帧有ROI数据: {roi_frames}")
-            
-            if len(roi_frames) < 2:
-                messagebox.showwarning("Warning", "需要至少2帧有ROI数据才能优化")
+            # 询问用户曲率权重
+            curvature_weight = self.ask_curvature_weight()
+            if curvature_weight is None:  # 用户取消
                 return
             
-            # 2. 计算光流
-            flows = []
-            print("开始计算光流...")
+            split_frames = sorted([idx for idx in self.spline_points_per_frame.keys() 
+                                if self.spline_points_per_frame[idx] is not None])
             
-            for i in range(len(self.image_files) - 1):
-                try:
-                    print(f"计算第 {i} 帧到第 {i+1} 帧的光流...")
-                    current_frame = Image.open(self.image_files[i]).convert('L')
-                    next_frame = Image.open(self.image_files[i + 1]).convert('L')
-                    
-                    current_array = np.array(current_frame)
-                    next_array = np.array(next_frame)
-                    
-                    print(f"图像尺寸 - 当前帧: {current_array.shape}, 下一帧: {next_array.shape}")
-                    
-                    # 检查图像尺寸是否一致
-                    if current_array.shape != next_array.shape:
-                        print(f"警告: 第 {i} 帧和第 {i+1} 帧尺寸不一致，调整尺寸...")
-                        # 调整到相同尺寸
-                        min_height = min(current_array.shape[0], next_array.shape[0])
-                        min_width = min(current_array.shape[1], next_array.shape[1])
-                        current_array = current_array[:min_height, :min_width]
-                        next_array = next_array[:min_height, :min_width]
-                    
-                    flow = cv2.calcOpticalFlowFarneback(
-                        current_array, next_array, None,
-                        pyr_scale=0.5, levels=3, winsize=15, iterations=3,
-                        poly_n=5, poly_sigma=1.2, flags=0
-                    )
-                    
-                    if flow is None:
-                        print(f"错误: 第 {i} 帧光流计算返回None")
-                        flows.append(None)
-                    else:
-                        print(f"光流计算成功 - 形状: {flow.shape}")
-                        flows.append(flow)
-                        
-                except Exception as e:
-                    print(f"计算第 {i} 帧光流时出错: {str(e)}")
-                    flows.append(None)
+            if len(split_frames) < window_size:
+                messagebox.showwarning("Warning", 
+                    f"有效帧数不足，需要{window_size}帧，当前只有{len(split_frames)}帧")
+                return
             
-            print(f"成功计算 {len([f for f in flows if f is not None])}/{len(flows)} 个光流")
+            print(f"开始增强时间光顺 - 基于曲率重采样 (权重: {curvature_weight})")
             
-            # 3. 优化运动一致性
-            optimized_count = 0
+            # 创建进度窗口
+            progress_window = tk.Toplevel(self.root)
+            progress_window.title("增强时间光顺处理中...")
+            progress_label = tk.Label(progress_window, text="步骤1: 时间光顺...")
+            progress_label.pack(pady=10)
+            progress_var = tk.DoubleVar()
+            progress_bar = ttk.Progressbar(progress_window, variable=progress_var, 
+                                        maximum=len(split_frames) + 2)
+            progress_bar.pack(pady=10, padx=20, fill=tk.X)
+            progress_window.grab_set()
+            
+            # 步骤1: 时间光顺
+            smoothed_split_data = {}
+            
+            for i, frame_idx in enumerate(split_frames):
+                progress_var.set(i + 1)
+                progress_label.config(text=f"步骤1: 时间光顺... ({i+1}/{len(split_frames)})")
+                progress_window.update()
+                
+                # 时间窗口光顺
+                start_idx = max(0, i - window_size // 2)
+                end_idx = min(len(split_frames), i + window_size // 2 + 1)
+                window_frame_indices = split_frames[start_idx:end_idx]
+                
+                window_points_list = []
+                window_types_list = []
+                window_major_list = []
+                window_minor_list = []
+                
+                for win_frame in window_frame_indices:
+                    if win_frame in self.spline_points_per_frame:
+                        data = self.spline_points_per_frame[win_frame]
+                        if data is not None:
+                            window_points_list.append(data['points'])
+                            window_types_list.append(data['point_types'])
+                            window_major_list.append(data['major_keypoint'])
+                            window_minor_list.append(data['minor_keypoint'])
+                
+                if len(window_points_list) > 0:
+                    averaged_points = np.mean(window_points_list, axis=0)
+                    averaged_major = np.mean(window_major_list, axis=0)
+                    averaged_minor = np.mean(window_minor_list, axis=0)
+                    current_types = self.spline_points_per_frame[frame_idx]['point_types']
+                    
+                    smoothed_split_data[frame_idx] = {
+                        'points': averaged_points,
+                        'point_types': current_types,
+                        'major_keypoint': averaged_major,
+                        'minor_keypoint': averaged_minor,
+                        'greater_length': self.spline_points_per_frame[frame_idx].get('greater_length', 0),
+                        'lesser_length': self.spline_points_per_frame[frame_idx].get('lesser_length', 0),
+                        'midpoints': self.spline_points_per_frame[frame_idx].get('midpoints')
+                    }
+                else:
+                    smoothed_split_data[frame_idx] = self.spline_points_per_frame[frame_idx].copy()
+            
+            # 更新split点数据
+            for frame_idx, new_data in smoothed_split_data.items():
+                self.spline_points_per_frame[frame_idx].update(new_data)
+            
+            # 步骤2: 基于曲率重采样控制点
+            progress_label.config(text="步骤2: 基于曲率重采样控制点...")
+            progress_var.set(len(split_frames) + 1)
+            progress_window.update()
+            
+            success_count = 0
             failed_frames = []
             
-            # 从第二帧开始优化（索引1）
-            for i in range(1, len(self.image_files)):
-                if i not in self.roi_points:
-                    print(f"跳过第 {i} 帧: 无ROI数据")
-                    continue
-                
-                if len(self.roi_points[i]) == 0:
-                    print(f"跳过第 {i} 帧: ROI数据为空")
-                    continue
-                
-                if (i-1) not in self.roi_points:
-                    print(f"跳过第 {i} 帧: 前一帧无ROI数据")
-                    continue
-                
-                if (i-1) >= len(flows) or flows[i-1] is None:
-                    print(f"跳过第 {i} 帧: 无有效光流数据")
-                    continue
-                
-                try:
-                    flow = flows[i-1]
-                    prev_points = self.roi_points[i-1]
-                    current_points = self.roi_points[i]
-                    
-                    print(f"优化第 {i} 帧 - 前一帧点数: {len(prev_points)}, 当前帧点数: {len(current_points)}")
-                    
-                    # 检查点数是否一致
-                    if len(prev_points) != len(current_points):
-                        print(f"警告: 第 {i-1} 帧和第 {i} 帧点数不一致 ({len(prev_points)} vs {len(current_points)})")
-                        # 使用较小的点数
-                        min_points = min(len(prev_points), len(current_points))
-                        prev_points = prev_points[:min_points]
-                        current_points = current_points[:min_points]
-                    
-                    predicted_points = []
-                    valid_predictions = 0
-                    
-                    for j, point in enumerate(prev_points):
-                        x, y = point
-                        
-                        # 检查坐标是否在图像范围内
-                        if (0 <= y < flow.shape[0] and 0 <= x < flow.shape[1]):
-                            dx = flow[int(y), int(x), 0]
-                            dy = flow[int(y), int(x), 1]
-                            
-                            # 检查光流值是否合理
-                            if abs(dx) < 100 and abs(dy) < 100:  # 合理的位移阈值
-                                predicted_points.append([x + dx, y + dy])
-                                valid_predictions += 1
-                            else:
-                                print(f"第 {i} 帧点 {j} 光流值异常: dx={dx:.2f}, dy={dy:.2f}")
-                                predicted_points.append(point)  # 使用原始点
-                        else:
-                            print(f"第 {i} 帧点 {j} 坐标超出范围: ({x:.1f}, {y:.1f})")
-                            predicted_points.append(point)  # 使用原始点
-                    
-                    print(f"第 {i} 帧有效预测: {valid_predictions}/{len(prev_points)}")
-                    
-                    if valid_predictions > len(prev_points) * 0.5:  # 至少50%有效预测
-                        # 与手动标注融合
-                        blended_points = 0.7 * np.array(current_points) + 0.3 * np.array(predicted_points)
-                        self.roi_points[i] = blended_points
-                        optimized_count += 1
-                        print(f"第 {i} 帧优化成功")
-                    else:
-                        failed_frames.append(i)
-                        print(f"第 {i} 帧优化失败: 有效预测点太少")
-                        
-                except Exception as e:
-                    print(f"优化第 {i} 帧时出错: {str(e)}")
-                    failed_frames.append(i)
+            for frame_idx in split_frames:
+                if self.resample_control_points_by_curvature_enhanced(frame_idx, points_per_curve, curvature_weight):
+                    success_count += 1
+                else:
+                    failed_frames.append(frame_idx + 1)
             
-            # 4. 显示结果
-            self.display_current_image()
+            progress_window.destroy()
             
-            result_message = f"运动一致性优化完成\n优化帧数: {optimized_count}"
+            # 显示结果
+            messagebox.showinfo("Success", 
+                f"增强时间光顺完成！\n\n"
+                f"基于曲率重采样完成")
+            
             if failed_frames:
-                result_message += f"\n失败帧: {failed_frames}"
+                messagebox.showwarning("部分成功", 
+                    f"以下帧重采样失败: {', '.join(map(str, failed_frames))}")
             
-            messagebox.showinfo("Success", result_message)
-            print(f"优化完成: {optimized_count} 帧成功, {len(failed_frames)} 帧失败")
+            self.status_var.set(f"增强光顺完成 - 曲率权重: {curvature_weight}")
+            
+            # 更新显示
+            self.update_roi_display()
             
         except Exception as e:
-            error_msg = f"运动优化失败: {str(e)}"
-            print(error_msg)
+            if 'progress_window' in locals():
+                progress_window.destroy()
+            messagebox.showerror("Error", f"增强时间光顺失败: {str(e)}")
             import traceback
             traceback.print_exc()
-            messagebox.showerror("Error", error_msg)
+
+    def validate_curvature_sampling_effect(self, sampled_points, original_curve, curvatures, target_num_points, curvature_weight):
+        """
+        验证曲率采样效果 - 详细分析
+        """
+        if len(sampled_points) < 3:
+            return
+        
+        # 计算采样点的曲率
+        sampled_curvatures = self.calculate_enhanced_curvature(np.array(sampled_points))
+        
+        if len(sampled_curvatures) == 0:
+            return
+        
+        # 分析曲率分布
+        original_curvature_mean = np.mean(curvatures) if len(curvatures) > 0 else 0
+        sampled_curvature_mean = np.mean(sampled_curvatures) if len(sampled_curvatures) > 0 else 0
+        
+        # 计算高曲率区域的点密度
+        if len(curvatures) > 0:
+            high_curvature_threshold = np.percentile(curvatures, 70)  # 前30%为高曲率
+            low_curvature_threshold = np.percentile(curvatures, 30)   # 后30%为低曲率
+            
+            high_curvature_indices = np.where(curvatures > high_curvature_threshold)[0]
+            low_curvature_indices = np.where(curvatures < low_curvature_threshold)[0]
+            
+            # 计算高曲率区域在采样点中的比例
+            high_curvature_coverage = len(high_curvature_indices) / len(curvatures)
+            
+            # print(f"    曲率权重: {curvature_weight}")
+            # print(f"    原始曲线平均曲率: {original_curvature_mean:.6f}")
+            # print(f"    采样点平均曲率: {sampled_curvature_mean:.6f}")
+            # print(f"    高曲率区域覆盖率: {high_curvature_coverage:.2%}")
+            
+            # 可视化曲率分布（可选）
+            #self.plot_curvature_distribution(original_curve, curvatures, sampled_points, sampled_curvatures, high_curvature_threshold, low_curvature_threshold)
+
+    def ask_curvature_weight(self):
+        """
+        询问用户曲率权重
+        """
+        weight_window = tk.Toplevel(self.root)
+        weight_window.title("曲率权重设置")
+        weight_window.geometry("300x150")
+        weight_window.transient(self.root)
+        weight_window.grab_set()
+        
+        tk.Label(weight_window, text="请输入曲率权重:", font=("Arial", 12)).pack(pady=10)
+        
+        weight_var = tk.DoubleVar(value=2.0)
+        weight_entry = tk.Entry(weight_window, textvariable=weight_var, font=("Arial", 12))
+        weight_entry.pack(pady=5)
+        
+        tk.Label(weight_window, text="权重越大，高曲率区域点越密集\n(推荐: 1.0-5.0)", 
+                font=("Arial", 9), fg="gray").pack(pady=5)
+        
+        result = [None]  # 用于存储结果
+        
+        def confirm():
+            try:
+                weight = float(weight_entry.get())
+                if weight < 0:
+                    messagebox.showwarning("警告", "曲率权重不能为负数")
+                    return
+                result[0] = weight
+                weight_window.destroy()
+            except ValueError:
+                messagebox.showwarning("警告", "请输入有效的数字")
+        
+        def cancel():
+            weight_window.destroy()
+        
+        button_frame = tk.Frame(weight_window)
+        button_frame.pack(pady=10)
+        
+        tk.Button(button_frame, text="确认", command=confirm, width=10).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="取消", command=cancel, width=10).pack(side=tk.LEFT, padx=5)
+        
+        weight_window.wait_window()
+        return result[0]
+
+    def resample_control_points_by_curvature_enhanced(self, frame_idx, target_num_points=30, curvature_weight=2.0):
+        """
+        基于曲率重采样控制点 - 修正版本（增加错误处理）
+        """
+        if frame_idx not in self.spline_points_per_frame:
+            print(f"帧 {frame_idx} 不在 spline_points_per_frame 中")
+            return False
+        
+        try:
+            data = self.spline_points_per_frame[frame_idx]
+            if data is None:
+                print(f"帧 {frame_idx} 的数据为 None")
+                return False
+                
+            smoothed_points = data['points']
+            point_types = data['point_types']
+            
+            if len(smoothed_points) == 0:
+                print(f"帧 {frame_idx} 的 smoothed_points 为空")
+                return False
+            
+            # 分割大弯和小弯点
+            greater_mask = point_types == 0  # 大弯点
+            lesser_mask = point_types == 1   # 小弯点
+            keypoint_mask = point_types == 2 # 关键点
+            
+            greater_points = smoothed_points[greater_mask]
+            lesser_points = smoothed_points[lesser_mask]
+            keypoints = smoothed_points[keypoint_mask]
+            
+            if len(keypoints) < 2:
+                print(f"帧 {frame_idx}: 关键点数量不足 ({len(keypoints)})")
+                return False
+            
+            # 确定大弯关键点和小弯关键点
+            if keypoints[0][0] > keypoints[1][0]:
+                major_keypoint = keypoints[0]
+                minor_keypoint = keypoints[1]
+            else:
+                major_keypoint = keypoints[1]
+                minor_keypoint = keypoints[0]
+            
+            print(f"基于曲率重采样 - 帧 {frame_idx} (权重: {curvature_weight}):")
+            print(f"  小弯点数量: {len(lesser_points)}, 大弯点数量: {len(greater_points)}")
+            
+            # 重新采样控制点（基于曲率）
+            new_control_points = []
+            
+            # 1. 添加小弯关键点（起点）
+            new_control_points.append(minor_keypoint.tolist())
+            
+            # 2. 对小弯曲线基于曲率重采样
+            if len(lesser_points) > 2:
+                try:
+                    lesser_control_points = self.sample_curve_by_curvature(
+                        lesser_points, target_num_points, curvature_weight)
+                    new_control_points.extend(lesser_control_points)
+                    print(f"  小弯控制点: {len(lesser_control_points)} 个 (基于曲率)")
+                except Exception as e:
+                    print(f"  小弯曲线采样失败: {e}")
+                    # 回退到均匀采样
+                    lesser_control_points = self.sample_curve_points(lesser_points, target_num_points)
+                    new_control_points.extend(lesser_control_points)
+                    print(f"  小弯控制点: {len(lesser_control_points)} 个 (均匀采样回退)")
+            else:
+                lesser_control_points = lesser_points.tolist()
+                new_control_points.extend(lesser_control_points)
+            
+            # 3. 添加大弯关键点
+            new_control_points.append(major_keypoint.tolist())
+            
+            # 4. 对大弯曲线基于曲率重采样
+            if len(greater_points) > 2:
+                try:
+                    greater_control_points = self.sample_curve_by_curvature(
+                        greater_points, target_num_points, curvature_weight)
+                    new_control_points.extend(greater_control_points)
+                    print(f"  大弯控制点: {len(greater_control_points)} 个 (基于曲率)")
+                except Exception as e:
+                    print(f"  大弯曲线采样失败: {e}")
+                    # 回退到均匀采样
+                    greater_control_points = self.sample_curve_points(greater_points, target_num_points)
+                    new_control_points.extend(greater_control_points)
+                    print(f"  大弯控制点: {len(greater_control_points)} 个 (均匀采样回退)")
+            else:
+                greater_control_points = greater_points.tolist()
+                new_control_points.extend(greater_control_points)
+            
+            # 检查控制点数量是否合理
+            if len(new_control_points) < 3:
+                print(f"警告: 帧 {frame_idx} 的控制点数量过少 ({len(new_control_points)})")
+                return False
+            
+            # 更新控制点
+            self.control_points = new_control_points
+            self.roi_points[frame_idx] = np.array(new_control_points)
+            
+            # 更新关键点索引
+            self.update_keypoint_indices(frame_idx, major_keypoint, minor_keypoint)
+            
+            print(f"  总控制点: {len(new_control_points)} 个")
+            return True
+            
+        except Exception as e:
+            print(f"基于曲率重采样失败 (帧 {frame_idx}): {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
 
     def calculate_wave_pair_time_differences(self, wave_interpolated_points, region_boundaries, frame_duration_s, curvature_type="lesser"):
         """
