@@ -15,6 +15,7 @@ from scipy.optimize import curve_fit
 import hashlib
 from scipy import interpolate
 import csv  
+import pandas as pd
 import datetime
     
 # Constants
@@ -4256,33 +4257,146 @@ class MRISegmentationApp:
 
     def save_centerline_data(self):
         if not hasattr(self, 'centerline_data'):
-            messagebox.showwarning("Warning", "no centerline data")
+            messagebox.showwarning("Warning", "No centerline data to save")
             return
         
         try:
+            # 让用户选择保存格式
+            file_types = [
+                ("CSV Files", "*.csv"),
+                ("NumPy ZIP Archive", "*.npz"),
+                ("All Files", "*.*")
+            ]
+            
             save_path = filedialog.asksaveasfilename(
-                defaultextension=".npz",
-                filetypes=[("NumPy ZIP Archive", "*.npz"), ("All Files", "*.*")],
+                defaultextension=".csv",
+                filetypes=file_types,
                 title="Save Centerline Data"
             )
             
-            if save_path:
-                # 准备数据 - 使用正确的数据结构
-                np.savez(
-                    save_path,
-                    # fitted_coefficients=self.centerline_data['fitted_coefficients'],
-                    # covariance_matrix=self.centerline_data['covariance_matrix'],
-                    centerline_points=self.centerline_data['centerline_points']
-                    # frame_indices=self.centerline_data['frame_indices'],
-                    # original_midpoints=self.centerline_data['original_midpoints']
-                )
-                
-                messagebox.showinfo("Success", f"Centerline data has been saved: {save_path}")
-        
+            if not save_path:
+                return
+            
+            # 获取文件扩展名
+            file_ext = os.path.splitext(save_path)[1].lower()
+            
+            if file_ext == '.csv':
+                # 保存为CSV格式
+                self._save_centerline_to_csv(save_path)
+            else:
+                # 保存为NPZ格式
+                self._save_centerline_to_npz(save_path)
+            
         except Exception as e:
             messagebox.showerror("Error", f"Save failed: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def _save_centerline_to_csv(self, filepath):
+        """将中心线数据保存为CSV格式"""
+        try:
+            centerline_points = self.centerline_data['centerline_points']
+            
+            # 获取像素间距信息
+            pixel_spacing_x, pixel_spacing_y = 1.0, 1.0
+            if hasattr(self, 'pixel_spacing') and self.pixel_spacing:
+                pixel_spacing_x, pixel_spacing_y = self.pixel_spacing
+            
+            # 询问用户保存哪种坐标
+            use_physical_coords = False
+            if self.has_pixel_spacing:
+                choice = messagebox.askyesno(
+                    "Coordinate System",
+                    f"Current pixel spacing: X={pixel_spacing_x:.6f} mm, Y={pixel_spacing_y:.6f} mm\n\n"
+                    "Do you want to export as physical coordinates (mm)?\n"
+                    "Select 'No' to export as pixel coordinates."
+                )
+                use_physical_coords = choice
+            
+            # 创建数据框
+            if use_physical_coords:
+                # 转换为物理坐标 (mm)
+                # 注意：通常MRI图像中，Y坐标可能需要反转或进行其他变换
+                # 这里假设X坐标直接乘以间距，Y坐标取负值并乘以间距（如果Y轴向下为正）
+                x_mm = centerline_points[:, 0] * pixel_spacing_x + self.custom_origin_x
+                y_mm = self.custom_origin_y  # Y方向通常是切片方向，这里设为固定值
+                z_mm = -centerline_points[:, 1] * pixel_spacing_y + self.custom_origin_z  # Z轴通常向上为正
+                
+                data = {
+                    'x_mm': x_mm,
+                    'y_mm': y_mm,
+                    'z_mm': z_mm,
+                    'point_index': np.arange(len(centerline_points))
+                }
+                
+                # 添加物理间距信息
+                df = pd.DataFrame(data)
+                
+                # 保存到CSV
+                df.to_csv(filepath, index=False)
+                
+                # 创建元数据文件
+                metadata_path = filepath.replace('.csv', '_metadata.txt')
+                with open(metadata_path, 'w') as f:
+                    f.write(f"Centerline Data Information\n")
+                    f.write(f"==========================\n")
+                    f.write(f"Export date: {pd.Timestamp.now()}\n")
+                    f.write(f"Number of points: {len(centerline_points)}\n")
+                    f.write(f"Coordinate system: Physical (mm)\n")
+                    f.write(f"Pixel spacing: X={pixel_spacing_x:.6f} mm, Y={pixel_spacing_y:.6f} mm\n")
+                    f.write(f"Origin coordinates: X={self.custom_origin_x}, Y={self.custom_origin_y}, Z={self.custom_origin_z}\n")
+                    f.write(f"Columns description:\n")
+                    f.write(f"  - x_mm: X coordinate in millimeters\n")
+                    f.write(f"  - y_mm: Y coordinate in millimeters (slice direction)\n")
+                    f.write(f"  - z_mm: Z coordinate in millimeters (negative of image Y coordinate)\n")
+                    f.write(f"  - point_index: Index of the point along the centerline\n")
+                
+                messagebox.showinfo(
+                    "Success", 
+                    f"Centerline data saved as physical coordinates (mm):\n"
+                    f"{filepath}\n\n"
+                    f"Metadata saved to:\n{metadata_path}"
+                )
+                
+            else:
+                # 保存为像素坐标
+                data = {
+                    'x_pixel': centerline_points[:, 0],
+                    'y_pixel': centerline_points[:, 1],
+                    'point_index': np.arange(len(centerline_points))
+                }
+                
+                df = pd.DataFrame(data)
+                df.to_csv(filepath, index=False)
+                
+                messagebox.showinfo(
+                    "Success", 
+                    f"Centerline data saved as pixel coordinates:\n{filepath}"
+                )
+            
+            self.status_var.set(f"Centerline data exported to CSV: {os.path.basename(filepath)}")
+            
+        except Exception as e:
+            raise Exception(f"Failed to save CSV: {str(e)}")
+
+    def _save_centerline_to_npz(self, filepath):
+        """将中心线数据保存为NPZ格式"""
+        try:
+            np.savez(
+                filepath,
+                centerline_points=self.centerline_data['centerline_points']
+                # fitted_coefficients=self.centerline_data.get('fitted_coefficients', None),
+                # covariance_matrix=self.centerline_data.get('covariance_matrix', None),
+                # frame_indices=self.centerline_data.get('frame_indices', []),
+                # original_midpoints=self.centerline_data.get('original_midpoints', []),
+                # average_major=self.centerline_data.get('average_major', None),
+                # average_minor=self.centerline_data.get('average_minor', None)
+            )
+            
+            messagebox.showinfo("Success", f"Centerline data saved as NPZ: {filepath}")
+            
+        except Exception as e:
+            raise Exception(f"Failed to save NPZ: {str(e)}")
 
     def calculate_optical_flow(self, prev_frame, curr_frame):
         """
