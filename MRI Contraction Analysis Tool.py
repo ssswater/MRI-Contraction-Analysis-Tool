@@ -763,6 +763,16 @@ class MRISegmentationApp:
             
             messagebox.showinfo("Success", f"{curvature_type.capitalize()} curvature analysis completed!")
             
+            export_result = messagebox.askyesno(
+            "Export Reference Radii",
+            f"{curvature_type.capitalize()} curvature analysis completed!\n\n"
+            f"Number of points: {len(ref_radii)}\n"
+            f"Mean reference radius: {np.mean(ref_radii):.3f} mm\n\n"
+            "Would you like to export the reference radii to CSV?"
+            )
+            if export_result:
+                self.export_reference_radii_to_csv(ref_radii, curvature_type)
+
         except Exception as e:
             messagebox.showerror("Error", f"Contraction analysis failed: {str(e)}")
 
@@ -1393,113 +1403,318 @@ class MRISegmentationApp:
             import traceback
             traceback.print_exc()
 
-    def save_wave_tracking_points(self, wave_points, region_boundaries, curvature_type):
-        """保存手动波追踪的点位置"""
-        try:
-            if not wave_points:
-                messagebox.showwarning("Warning", "没有波追踪点可保存")
-                return
-            
-            save_path = filedialog.asksaveasfilename(
-                defaultextension=".json",
-                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-                title="保存波追踪点"
-            )
-            
-            if not save_path:
-                return
-            
-            # 准备保存的数据结构
-            wave_data = {
-                "curvature_type": curvature_type,
-                "region_boundaries": region_boundaries.tolist() if hasattr(region_boundaries, 'tolist') else region_boundaries,
-                "wave_points": [],
-                "timestamp": datetime.datetime.now().isoformat(),
-                "image_folder_hash": hashlib.md5(self.image_folder.encode()).hexdigest() if self.image_folder else None
-            }
-            
-            # 转换波点数据为可序列化格式
-            for wave in wave_points:
-                serialized_wave = []
-                for point in wave:
-                    frame, position = point
-                    serialized_wave.append([float(frame), float(position)])
-                wave_data["wave_points"].append(serialized_wave)
-            
-            # 保存到文件
-            with open(save_path, 'w', encoding='utf-8') as f:
-                json.dump(wave_data, f, indent=2, ensure_ascii=False)
-            
-            messagebox.showinfo("Success", f"波追踪点已保存到:\n{save_path}")
-            self.status_var.set(f"波追踪点已保存 - {os.path.basename(save_path)}")
-            
-            return save_path
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"保存波追踪点失败: {str(e)}")
-            import traceback
-            traceback.print_exc()
+    def find_wave_boundary_with_gap_tolerance(self, spatial_signal, p_idx, threshold_mm, max_gap=3):
+        """
+        从p_idx向两侧搜索波边界，允许中间存在最多max_gap个连续低于阈值的点
+        
+        Args:
+            spatial_signal: 该时刻的空间信号
+            p_idx: 红点位置
+            threshold_mm: 固定阈值
+            max_gap: 允许的最大间隙点数
+        """
+        n_points = len(spatial_signal)
+        
+        # 向左搜索
+        left = p_idx
+        gap_count = 0
+        i = p_idx - 1
+        while i >= 0:
+            if spatial_signal[i] > threshold_mm:
+                left = i
+                gap_count = 0
+            else:
+                gap_count += 1
+                if gap_count > max_gap:
+                    break
+            i -= 1
+        
+        # 向右搜索
+        right = p_idx
+        gap_count = 0
+        i = p_idx + 1
+        while i < n_points:
+            if spatial_signal[i] > threshold_mm:
+                right = i
+                gap_count = 0
+            else:
+                gap_count += 1
+                if gap_count > max_gap:
+                    break
+            i += 1
+        
+        return left, right
 
-    def load_wave_tracking_points(self):
-        """加载手动波追踪的点位置"""
+    def calculate_wave_spatial_width(self, contraction_sizes, wave_interpolated_points,
+                                    region_boundaries, point_spacing_mm,
+                                    threshold_mm=1.0, max_gap=3, curvature_type="lesser"):
+        """
+        计算每个红点/蓝点对应的空间波宽，使用gap tolerance方法
+        
+        Args:
+            contraction_sizes: 收缩图矩阵 (n_frames x n_points)
+            wave_interpolated_points: 波插值点数据
+            region_boundaries: 区域边界
+            point_spacing_mm: 点间距(mm)
+            threshold_mm: 固定阈值(mm)
+            max_gap: 允许的最大间隙点数
+            curvature_type: 曲率类型
+        """
+        n_frames, n_points = contraction_sizes.shape
+        region_position_widths = {}
+        
+        for wave_id, wave_data in wave_interpolated_points.items():
+            
+            # 处理红点
+            for region_key, pts in wave_data['internal_points'].items():
+                region_start, region_end = region_key
+                
+                # 跳过首尾区域
+                region_idx = None
+                for i in range(len(region_boundaries) - 1):
+                    if region_boundaries[i] == region_start and region_boundaries[i+1] == region_end:
+                        region_idx = i
+                        break
+                if region_idx is None or region_idx == 0 or region_idx == len(region_boundaries) - 2:
+                    continue
+                
+                if region_key not in region_position_widths:
+                    region_position_widths[region_key] = {}
+                
+                for t, p in pts:
+                    t_int = int(round(float(t)))
+                    p_float = float(p)
+                    p_idx = int(round(p_float))
+                    p_key = round(p_float, 1)
+                    
+                    if not (0 <= t_int < n_frames and 0 <= p_idx < n_points):
+                        continue
+                    
+                    spatial_signal = contraction_sizes[t_int, :]
+                    
+                    # 红点本身必须超过阈值
+                    if spatial_signal[p_idx] <= threshold_mm:
+                        continue
+                    
+                    # 用gap tolerance方法找边界
+                    left, right = self.find_wave_boundary_with_gap_tolerance(
+                        spatial_signal, p_idx, threshold_mm, max_gap)
+                    
+                    width_mm = (right - left) * point_spacing_mm
+                    
+                    if width_mm <= 0:
+                        continue
+                    
+                    if p_key not in region_position_widths[region_key]:
+                        region_position_widths[region_key][p_key] = {
+                            'widths': [],
+                            'wave_ids': [],
+                            'point_type': 'internal',
+                            'left_boundaries': [],
+                            'right_boundaries': []
+                        }
+                    region_position_widths[region_key][p_key]['widths'].append(width_mm)
+                    region_position_widths[region_key][p_key]['wave_ids'].append(wave_id)
+                    region_position_widths[region_key][p_key]['left_boundaries'].append(left)
+                    region_position_widths[region_key][p_key]['right_boundaries'].append(right)
+            
+            # 处理蓝点
+            for t, p in wave_data['boundary_points']:
+                p_float = float(p)
+                t_int = int(round(float(t)))
+                p_idx = int(round(p_float))
+                p_key = round(p_float, 1)
+                
+                # 确定所属区域
+                region_key = None
+                for i in range(len(region_boundaries) - 1):
+                    if i == 0 or i == len(region_boundaries) - 2:
+                        continue
+                    if abs(p_float - region_boundaries[i]) < 0.5 or abs(p_float - region_boundaries[i+1]) < 0.5:
+                        region_key = (region_boundaries[i], region_boundaries[i+1])
+                        break
+                
+                if region_key is None:
+                    continue
+                if not (0 <= t_int < n_frames and 0 <= p_idx < n_points):
+                    continue
+                
+                spatial_signal = contraction_sizes[t_int, :]
+                
+                if spatial_signal[p_idx] <= threshold_mm:
+                    continue
+                
+                left, right = self.find_wave_boundary_with_gap_tolerance(
+                    spatial_signal, p_idx, threshold_mm, max_gap)
+                
+                width_mm = (right - left) * point_spacing_mm
+                
+                if width_mm <= 0:
+                    continue
+                
+                if region_key not in region_position_widths:
+                    region_position_widths[region_key] = {}
+                
+                if p_key not in region_position_widths[region_key]:
+                    region_position_widths[region_key][p_key] = {
+                        'widths': [],
+                        'wave_ids': [],
+                        'point_type': 'boundary',
+                        'left_boundaries': [],
+                        'right_boundaries': []
+                    }
+                region_position_widths[region_key][p_key]['widths'].append(width_mm)
+                region_position_widths[region_key][p_key]['wave_ids'].append(wave_id)
+                region_position_widths[region_key][p_key]['left_boundaries'].append(left)
+                region_position_widths[region_key][p_key]['right_boundaries'].append(right)
+        
+        # 对每个位置取平均
+        result = {}
+        for region_key, pos_data in region_position_widths.items():
+            result[region_key] = {}
+            for p_key, data in pos_data.items():
+                widths = data['widths']
+                result[region_key][p_key] = {
+                    'mean_spatial_width_mm': np.mean(widths),
+                    'std_spatial_width_mm': np.std(widths) if len(widths) > 1 else 0.0,
+                    'all_widths_mm': widths,
+                    'wave_ids': data['wave_ids'],
+                    'num_waves': len(widths),
+                    'point_type': data['point_type'],
+                    'left_boundaries': data['left_boundaries'],
+                    'right_boundaries': data['right_boundaries']
+                }
+        
+        return result
+
+    def export_wave_spatial_widths_to_csv(self, spatial_width_data, curvature_type, point_spacing_mm):
+        os.makedirs('results', exist_ok=True)
+        
+        # 先计算每个region的平均值
+        region_stats = {}
+        for region_key, pos_data in spatial_width_data.items():
+            all_widths_in_region = []
+            for p_key, data in pos_data.items():
+                all_widths_in_region.append(data['mean_spatial_width_mm'])
+            
+            if all_widths_in_region:
+                region_stats[region_key] = {
+                    'region_mean': np.mean(all_widths_in_region),
+                    'region_std': np.std(all_widths_in_region) if len(all_widths_in_region) > 1 else 0.0,
+                    'region_min': np.min(all_widths_in_region),
+                    'region_max': np.max(all_widths_in_region),
+                    'num_positions': len(all_widths_in_region)
+                }
+        
+        # 文件1：详细数据
+        filename_detail = f'results/{curvature_type}_wave_spatial_widths.csv'
+        with open(filename_detail, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['RegionID', 'RegionStart', 'RegionEnd', 'Position_p',
+                            'PointType', 'NumWaves', 'WaveIDs',
+                            'WidthPerWave_mm',
+                            'LeftBoundaries', 'RightBoundaries',
+                            'Mean_Spatial_Width_mm',
+                            'Std_Spatial_Width_mm'])
+            
+            for region_id, (region_key, pos_data) in enumerate(sorted(spatial_width_data.items()), 1):
+                region_start, region_end = region_key
+                for p_key, data in sorted(pos_data.items()):
+                    writer.writerow([
+                        region_id, region_start, region_end,
+                        f"{p_key:.1f}",
+                        data['point_type'],
+                        data['num_waves'],
+                        str(data['wave_ids']),
+                        str([f"{w:.4f}" for w in data['all_widths_mm']]),
+                        str(data['left_boundaries']),
+                        str(data['right_boundaries']),
+                        f"{data['mean_spatial_width_mm']:.4f}",
+                        f"{data['std_spatial_width_mm']:.4f}"
+                    ])
+        
+        # 文件2：Region汇总
+        filename_summary = f'results/{curvature_type}_region_wave_width.csv'
+        with open(filename_summary, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['region_id', 'region_start', 'region_end',
+                            'Region_Mean_Width_mm', 'Region_Std_Width_mm',
+                            'Region_Min_Width_mm', 'Region_Max_Width_mm',
+                            'Num_Positions'])
+            
+            for region_id, (region_key, _) in enumerate(sorted(spatial_width_data.items()), 1):
+                region_start, region_end = region_key
+                stats = region_stats.get(region_key, {})
+                writer.writerow([
+                    region_id, region_start, region_end,
+                    f"{stats.get('region_mean', 0.0):.4f}",
+                    f"{stats.get('region_std', 0.0):.4f}",
+                    f"{stats.get('region_min', 0.0):.4f}",
+                    f"{stats.get('region_max', 0.0):.4f}",
+                    stats.get('num_positions', 0)
+                ])
+        
+        print(f"Spatial wave widths exported to {filename_detail}")
+        print(f"Region summary exported to {filename_summary}")
+
+    def _track_waves_for_curvature(self, curvature_type):
         try:
-            load_path = filedialog.askopenfilename(
-                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-                title="加载波追踪点"
-            )
-            
-            if not load_path:
-                return None, None, None
-            
-            with open(load_path, 'r', encoding='utf-8') as f:
-                wave_data = json.load(f)
-            
-            # 验证数据完整性
-            required_fields = ["curvature_type", "region_boundaries", "wave_points"]
-            for field in required_fields:
-                if field not in wave_data:
-                    raise ValueError(f"缺少必要字段: {field}")
-            
-            # 验证图像文件夹（可选）
-            if (wave_data.get("image_folder_hash") and 
-                self.image_folder and 
-                hashlib.md5(self.image_folder.encode()).hexdigest() != wave_data["image_folder_hash"]):
+            if (not hasattr(self, 'contraction_data') or 
+                self.contraction_data is None or 
+                self.contraction_data.get('curvature_type') != curvature_type):
                 
                 result = messagebox.askyesno(
-                    "警告", 
-                    "波追踪点数据来自不同的图像文件夹。是否继续加载？"
+                    "Analysis Required", 
+                    f"{curvature_type.capitalize()} curvature analysis is required for wave tracking.\n"
+                    f"Do you want to run {curvature_type} curvature analysis now?"
                 )
-                if not result:
-                    return None, None, None
+                
+                if result:
+                    self.analyze_contraction(curvature_type)
+                    if (hasattr(self, 'contraction_data') and 
+                        self.contraction_data is not None and 
+                        self.contraction_data.get('curvature_type') == curvature_type):
+                        pass
+                    else:
+                        return
+                else:
+                    return
             
-            # 转换数据格式
-            curvature_type = wave_data["curvature_type"]
-            region_boundaries = np.array(wave_data["region_boundaries"])
+            cont_sizes = self.contraction_data['contraction_sizes']
+            percentage_occlusion = self.contraction_data['percentage_occlusion']
             
-            wave_points = []
-            for serialized_wave in wave_data["wave_points"]:
-                wave = []
-                for point in serialized_wave:
-                    frame, position = point
-                    wave.append((frame, position))
-                wave_points.append(wave)
+            if curvature_type == "lesser":
+                spacing = self.lesser_spacing.get()
+            else:
+                spacing = self.greater_spacing.get()
             
-            messagebox.showinfo("Success", 
-                f"波追踪点加载成功:\n"
-                f"- 曲率类型: {curvature_type}\n"
-                f"- 波数量: {len(wave_points)}\n"
-                f"- 区域数量: {len(region_boundaries)-1}"
-            )
+            frame_duration = self.frame_duration.get()
+            max_contraction = self.max_contraction.get()
             
-            self.status_var.set(f"波追踪点已加载 - {len(wave_points)}个波")
+            wave_points, physical_speeds, region_boundaries, intersections, interpolated_points = self.manually_track_waves_with_save_load(
+                cont_sizes, spacing, frame_duration, N_REGIONS, curvature_type, max_contraction)
             
-            return wave_points, region_boundaries, curvature_type
+            self.visualize_tracked_waves(cont_sizes, wave_points, region_boundaries, 
+                                    intersections, interpolated_points, curvature_type, max_contraction)
+            
+            self.export_wave_data(interpolated_points, region_boundaries, spacing, frame_duration, curvature_type)
+            self.export_region_wave_contraction_stats(cont_sizes, percentage_occlusion, interpolated_points, region_boundaries, curvature_type)
+            
+            spatial_widths = self.calculate_wave_spatial_width(
+                cont_sizes, interpolated_points, region_boundaries,
+                spacing, threshold_mm=1.0, max_gap=3,
+                curvature_type=curvature_type)
+
+            self.export_wave_spatial_widths_to_csv(
+                spatial_widths, curvature_type, spacing)
+
+
+            messagebox.showinfo("Success", f"{curvature_type.capitalize()} curvature wave tracking completed!")
             
         except Exception as e:
-            messagebox.showerror("Error", f"加载波追踪点失败: {str(e)}")
+            messagebox.showerror("Error", f"{curvature_type.capitalize()} curvature wave tracking failed: {str(e)}")
             import traceback
             traceback.print_exc()
-            return None, None, None
 
     def manually_track_waves_with_save_load(self, contraction_sizes, point_spacing_mm, frame_duration_s, n_regions, curvature_type="lesser", max_contraction=10):
         """
@@ -1824,56 +2039,176 @@ class MRISegmentationApp:
         
         return all_waves, physical_speeds, region_boundaries, wave_boundary_intersections, wave_interpolated_points
 
-    def _track_waves_for_curvature(self, curvature_type):
+    def save_wave_tracking_points(self, wave_points, region_boundaries, curvature_type):
+        """保存手动波追踪的点位置"""
         try:
-            if (not hasattr(self, 'contraction_data') or 
-                self.contraction_data is None or 
-                self.contraction_data.get('curvature_type') != curvature_type):
-                
-                result = messagebox.askyesno(
-                    "Analysis Required", 
-                    f"{curvature_type.capitalize()} curvature analysis is required for wave tracking.\n"
-                    f"Do you want to run {curvature_type} curvature analysis now?"
-                )
-                
-                if result:
-                    self.analyze_contraction(curvature_type)
-                    if (hasattr(self, 'contraction_data') and 
-                        self.contraction_data is not None and 
-                        self.contraction_data.get('curvature_type') == curvature_type):
-                        pass
-                    else:
-                        return
-                else:
-                    return
+            if not wave_points:
+                messagebox.showwarning("Warning", "没有波追踪点可保存")
+                return
             
-            cont_sizes = self.contraction_data['contraction_sizes']
-            percentage_occlusion = self.contraction_data['percentage_occlusion']
+            save_path = filedialog.asksaveasfilename(
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+                title="保存波追踪点"
+            )
             
-            if curvature_type == "lesser":
-                spacing = self.lesser_spacing.get()
-            else:
-                spacing = self.greater_spacing.get()
+            if not save_path:
+                return
             
-            frame_duration = self.frame_duration.get()
-            max_contraction = self.max_contraction.get()
+            # 准备保存的数据结构
+            wave_data = {
+                "curvature_type": curvature_type,
+                "region_boundaries": region_boundaries.tolist() if hasattr(region_boundaries, 'tolist') else region_boundaries,
+                "wave_points": [],
+                "timestamp": datetime.datetime.now().isoformat(),
+                "image_folder_hash": hashlib.md5(self.image_folder.encode()).hexdigest() if self.image_folder else None
+            }
             
-            # 使用新的包含保存/加载功能的波追踪函数
-            wave_points, physical_speeds, region_boundaries, intersections, interpolated_points = self.manually_track_waves_with_save_load(
-                cont_sizes, spacing, frame_duration, N_REGIONS, curvature_type, max_contraction)
+            # 转换波点数据为可序列化格式
+            for wave in wave_points:
+                serialized_wave = []
+                for point in wave:
+                    frame, position = point
+                    serialized_wave.append([float(frame), float(position)])
+                wave_data["wave_points"].append(serialized_wave)
             
-            self.visualize_tracked_waves(cont_sizes, wave_points, region_boundaries, 
-                                    intersections, interpolated_points, curvature_type, max_contraction)
+            # 保存到文件
+            with open(save_path, 'w', encoding='utf-8') as f:
+                json.dump(wave_data, f, indent=2, ensure_ascii=False)
             
-            self.export_wave_data(interpolated_points, region_boundaries, spacing, frame_duration, curvature_type)
-            self.export_region_wave_contraction_stats(cont_sizes, percentage_occlusion, interpolated_points, region_boundaries, curvature_type)
+            messagebox.showinfo("Success", f"波追踪点已保存到:\n{save_path}")
+            self.status_var.set(f"波追踪点已保存 - {os.path.basename(save_path)}")
             
-            messagebox.showinfo("Success", f"{curvature_type.capitalize()} curvature wave tracking completed!")
+            return save_path
             
         except Exception as e:
-            messagebox.showerror("Error", f"{curvature_type.capitalize()} curvature wave tracking failed: {str(e)}")
+            messagebox.showerror("Error", f"保存波追踪点失败: {str(e)}")
             import traceback
             traceback.print_exc()
+
+    def load_wave_tracking_points(self):
+        """加载手动波追踪的点位置"""
+        try:
+            load_path = filedialog.askopenfilename(
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+                title="加载波追踪点"
+            )
+            
+            if not load_path:
+                return None, None, None
+            
+            with open(load_path, 'r', encoding='utf-8') as f:
+                wave_data = json.load(f)
+            
+            # 验证数据完整性
+            required_fields = ["curvature_type", "region_boundaries", "wave_points"]
+            for field in required_fields:
+                if field not in wave_data:
+                    raise ValueError(f"缺少必要字段: {field}")
+            
+            # 验证图像文件夹（可选）
+            if (wave_data.get("image_folder_hash") and 
+                self.image_folder and 
+                hashlib.md5(self.image_folder.encode()).hexdigest() != wave_data["image_folder_hash"]):
+                
+                result = messagebox.askyesno(
+                    "警告", 
+                    "波追踪点数据来自不同的图像文件夹。是否继续加载？"
+                )
+                if not result:
+                    return None, None, None
+            
+            # 转换数据格式
+            curvature_type = wave_data["curvature_type"]
+            region_boundaries = np.array(wave_data["region_boundaries"])
+            
+            wave_points = []
+            for serialized_wave in wave_data["wave_points"]:
+                wave = []
+                for point in serialized_wave:
+                    frame, position = point
+                    wave.append((frame, position))
+                wave_points.append(wave)
+            
+            messagebox.showinfo("Success", 
+                f"波追踪点加载成功:\n"
+                f"- 曲率类型: {curvature_type}\n"
+                f"- 波数量: {len(wave_points)}\n"
+                f"- 区域数量: {len(region_boundaries)-1}"
+            )
+            
+            self.status_var.set(f"波追踪点已加载 - {len(wave_points)}个波")
+            
+            return wave_points, region_boundaries, curvature_type
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"加载波追踪点失败: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None, None, None
+
+    def export_reference_radii_to_csv(self, reference_radii, curvature_type):
+        """
+        将参考半径导出到CSV文件
+        """
+        try:
+            # 询问用户保存路径
+            save_path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                title=f"Export Reference Radii - {curvature_type.capitalize()} Curvature",
+                initialfile=f"{curvature_type}_reference_radii.csv"
+            )
+            
+            if not save_path:
+                return
+            
+            # 创建数据
+            data = []
+            for i, radius in enumerate(reference_radii):
+                data.append({
+                    'point_index': i + 1,  # 从1开始计数
+                    'reference_radius_mm': radius
+                })
+            
+            # 转换为DataFrame
+            df = pd.DataFrame(data)
+            
+            # 保存到CSV
+            df.to_csv(save_path, index=False)
+            
+            # 创建元数据文件
+            metadata_path = save_path.replace('.csv', '_metadata.txt')
+            with open(metadata_path, 'w') as f:
+                f.write(f"Reference Radii Data - {curvature_type.capitalize()} Curvature\n")
+                f.write("=" * 60 + "\n\n")
+                f.write(f"Export Date: {pd.Timestamp.now()}\n")
+                f.write(f"Curvature Type: {curvature_type}\n")
+                f.write(f"Number of Points: {len(reference_radii)}\n")
+                f.write(f"Pixel Spacing: X={self.pixel_spacing[0]:.6f} mm, Y={self.pixel_spacing[1]:.6f} mm\n")
+                
+                if hasattr(self, 'contraction_data') and 'reference_radii' in self.contraction_data:
+                    radii = self.contraction_data['reference_radii']
+                    f.write(f"\nStatistical Summary:\n")
+                    f.write(f"  Mean Radius: {np.mean(radii):.4f} mm\n")
+                    f.write(f"  Standard Deviation: {np.std(radii):.4f} mm\n")
+                    f.write(f"  Minimum Radius: {np.min(radii):.4f} mm\n")
+                    f.write(f"  Maximum Radius: {np.max(radii):.4f} mm\n")
+                    f.write(f"  Median Radius: {np.median(radii):.4f} mm\n")
+            
+            messagebox.showinfo(
+                "Export Successful",
+                f"Reference radii exported successfully!\n\n"
+                f"File: {save_path}\n"
+                f"Metadata: {metadata_path}\n\n"
+                f"Number of points: {len(reference_radii)}\n"
+                f"Mean radius: {np.mean(reference_radii):.3f} mm"
+            )
+            
+            self.status_var.set(f"Reference radii exported - {curvature_type} curvature")
+            
+        except Exception as e:
+            messagebox.showerror("Export Error", f"Failed to export reference radii: {str(e)}")
 
     def create_widgets(self):
         # Main frame
@@ -4384,7 +4719,7 @@ class MRISegmentationApp:
         try:
             np.savez(
                 filepath,
-                centerline_points=self.centerline_data['centerline_points']
+                centerline_points=self.centerline_data['centerline_points']#,
                 # fitted_coefficients=self.centerline_data.get('fitted_coefficients', None),
                 # covariance_matrix=self.centerline_data.get('covariance_matrix', None),
                 # frame_indices=self.centerline_data.get('frame_indices', []),
