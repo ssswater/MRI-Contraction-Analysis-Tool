@@ -484,6 +484,7 @@ class MRISegmentationApp:
         file_menu.add_command(label="Save Workspace", command=self.save_workspace)
         file_menu.add_command(label="Load Workspace", command=self.load_workspace)
         file_menu.add_command(label="Export Images with ROIs", command=self.export_images_with_rois)  
+        file_menu.add_command(label="Export Images Mask", command=self.export_images_mask)  
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
 
@@ -3980,6 +3981,71 @@ class MRISegmentationApp:
         
         except Exception as e:
             messagebox.showerror("Error", f"Export failed: {str(e)}")
+        
+        finally:
+            progress_window.destroy()
+
+    def export_images_mask(self):
+        """export images with contour as binary mask (white = stomach, black = background)"""
+        if not self.image_files:
+            messagebox.showwarning("warning", "No images loaded")
+            return
+        
+        output_dir = filedialog.askdirectory(title="select output folder")
+        if not output_dir:
+            return
+        
+        # 创建进度窗口
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("Exporting masks")
+        progress_label = tk.Label(progress_window, text="exporting masks ...")
+        progress_label.pack(pady=10)
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar(progress_window, variable=progress_var, 
+                                    maximum=len(self.image_files))
+        progress_bar.pack(pady=10, padx=20, fill=tk.X)
+        progress_window.grab_set()
+        
+        try:
+            for i, img_path in enumerate(self.image_files):
+                progress_var.set(i+1)
+                progress_label.config(text=f"Exporting {i+1}/{len(self.image_files)}")
+                progress_window.update()
+                
+                # 加载原始图像以获取尺寸
+                img = Image.open(img_path)
+                img_array = np.array(img)
+                height, width = img_array.shape[:2]
+                
+                # 创建一个全黑的掩膜图像
+                mask = np.zeros((height, width), dtype=np.uint8)
+                
+                # 如果该帧有ROI数据，则绘制ROI区域为白色
+                if i in self.roi_points and len(self.roi_points[i]) > 0:
+                    control_points = self.roi_points[i]
+                    
+                    # 生成样条曲线
+                    points = np.vstack([control_points, control_points[0]])  # 闭合曲线
+                    tck, u = splprep([points[:, 0], points[:, 1]], s=0, per=1)
+                    u_new = np.linspace(0, 1, 1000)
+                    spline_points = np.array(splev(u_new, tck)).T
+                    
+                    # 将样条点转换为整数坐标用于绘制
+                    contour = np.round(spline_points).astype(np.int32)
+                    
+                    # 使用OpenCV填充多边形为白色
+                    cv2.fillPoly(mask, [contour], 255)
+                
+                # 保存掩膜图像
+                output_path = os.path.join(output_dir, f"frame_{i:04d}_mask.png")
+                Image.fromarray(mask).save(output_path)
+            
+            messagebox.showinfo("Success", f"Exported {len(self.image_files)} mask images to:\n{output_dir}")
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Export failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
         
         finally:
             progress_window.destroy()
